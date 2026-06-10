@@ -1,0 +1,108 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: cc_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-chat}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-chatpass}
+      POSTGRES_DB: ${POSTGRES_DB:-corporate_chat}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-chat} -d ${POSTGRES_DB:-corporate_chat}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [ccnet]
+
+  redis:
+    image: redis:7-alpine
+    container_name: cc_redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [ccnet]
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cc_backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-chat}:${POSTGRES_PASSWORD:-chatpass}@db:5432/${POSTGRES_DB:-corporate_chat}
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-please-change-this-to-a-long-random-secret-string-123456}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@corporate.chat}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-Admin12345!}
+      DEBUG: ${DEBUG:-false}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      # ---- Auth mode ----
+      ALLOW_LOCAL_AUTH: ${ALLOW_LOCAL_AUTH:-true}
+      # ---- Active Directory / LDAP ----
+      LDAP_ENABLED: ${LDAP_ENABLED:-false}
+      LDAP_SERVERS: ${LDAP_SERVERS:-ldap://dc.company.local:389}
+      LDAP_USE_SSL: ${LDAP_USE_SSL:-false}
+      LDAP_START_TLS: ${LDAP_START_TLS:-false}
+      LDAP_BASE_DN: ${LDAP_BASE_DN:-DC=company,DC=local}
+      LDAP_DOMAIN: ${LDAP_DOMAIN:-company.local}
+      LDAP_NETBIOS: ${LDAP_NETBIOS:-}
+      LDAP_LOGIN_ATTR: ${LDAP_LOGIN_ATTR:-sAMAccountName}
+      LDAP_BIND_DN: ${LDAP_BIND_DN:-}
+      LDAP_BIND_PASSWORD: ${LDAP_BIND_PASSWORD:-}
+      LDAP_ADMIN_GROUP: ${LDAP_ADMIN_GROUP:-}
+      LDAP_REQUIRED_GROUP: ${LDAP_REQUIRED_GROUP:-}
+      LDAP_TIMEOUT: ${LDAP_TIMEOUT:-8}
+      LDAP_SYNC_GROUPS: ${LDAP_SYNC_GROUPS:-true}
+      LDAP_GROUP_FILTER: ${LDAP_GROUP_FILTER:-}
+      LDAP_GROUP_EXCLUDE: ${LDAP_GROUP_EXCLUDE:-Domain Users,Domain Computers,Domain Guests}
+      # ---- SSO (NTLM / Kerberos / Reverse Proxy) ----
+      SSO_ENABLED: ${SSO_ENABLED:-false}
+      SSO_ALLOW_PROXY: ${SSO_ALLOW_PROXY:-true}
+      SSO_ALLOW_NEGOTIATE: ${SSO_ALLOW_NEGOTIATE:-true}
+      SSO_SERVICE_NAME: ${SSO_SERVICE_NAME:-}
+      SSO_KEYTAB_PATH: ${SSO_KEYTAB_PATH:-}
+      KRB5_KTNAME: ${SSO_KEYTAB_PATH:-}
+      KRB5_CONFIG: /etc/krb5.conf
+      # ---- Uploads ----
+      UPLOAD_DIR: /app/uploads
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-25}
+    volumes:
+      - uploads:/app/uploads
+      - ./krb5.keytab:/etc/krb5.keytab
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [ccnet]
+
+  nginx:
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
+      args:
+        CACHEBUST: 1
+    container_name: cc_nginx
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    depends_on:
+      backend:
+        condition: service_healthy   # <-- waits for a READY backend => no 502
+    volumes:
+      - uploads:/usr/share/nginx/uploads:ro
+    networks: [ccnet]
+
+volumes:
+  pgdata:
+  uploads:
+
+networks:
+  ccnet:
+    driver: bridge
