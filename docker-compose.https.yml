@@ -1,0 +1,23 @@
+# ============================================================
+#  HTTPS overlay for production.
+#  Usage:
+#    docker compose -f docker-compose.yml -f docker-compose.https.yml up -d --build
+#
+#  Put your TLS certificate files into ./nginx/certs/ :
+#    nginx/certs/fullchain.pem   (certificate + chain)
+#    nginx/certs/privkey.pem     (private key)
+#  (From your corporate CA, or Let's Encrypt, or a self-signed cert.)
+# ============================================================
+services:
+  nginx:
+    # NOTE: Docker Compose CONCATENATES list values (like "ports") across files.
+    # The base file already maps port 80, so here we add ONLY 443 to avoid
+    # binding port 80 twice (a duplicate bind makes nginx fail to start ->
+    # ERR_CONNECTION_REFUSED in the browser).
+    ports:
+      - "443:443"
+    volumes:
+      # override the active nginx config with the HTTPS one
+      - ./nginx/nginx.https.conf:/etc/nginx/nginx.conf:ro
+      # mount the certificates (read-only)
+      - ./nginx/certs:/etc/nginx/certs:ro
