@@ -23,9 +23,31 @@ async def _members(db: AsyncSession, chat_id: int) -> list[int]:
     return list((await db.execute(select(ChatMember.user_id).where(ChatMember.chat_id == chat_id))).scalars().all())
 
 
-async def _ensure_member(db: AsyncSession, chat_id: int, user_id: int) -> None:
-    if user_id not in await _members(db, chat_id):
+async def _ensure_member(db: AsyncSession, chat_id: int, user_id: int) -> ChatMember:
+    cm = (
+        await db.execute(
+            select(ChatMember).where(ChatMember.chat_id == chat_id, ChatMember.user_id == user_id)
+        )
+    ).scalar_one_or_none()
+    if cm is None:
         raise HTTPException(status_code=403, detail="Нет доступа к этому чату")
+    return cm
+
+
+async def _ensure_can_post(db: AsyncSession, chat_id: int, user: User, cm: ChatMember | None = None) -> Chat:
+    """Validate chat-specific write permissions.
+
+    Channels are announcement-only: ordinary members can read, while channel
+    admins and global application admins can publish.
+    """
+    chat = (await db.execute(select(Chat).where(Chat.id == chat_id))).scalar_one_or_none()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Чат не найден")
+    if cm is None:
+        cm = await _ensure_member(db, chat_id, user.id)
+    if chat.type == "channel" and not cm.is_admin and user.role != "admin":
+        raise HTTPException(status_code=403, detail="В канал могут писать только администраторы")
+    return chat
 
 
 def _to_out(msg: Message, sender: User, reactions: list[ReactionOut]) -> MessageOut:
@@ -51,6 +73,7 @@ def _to_out(msg: Message, sender: User, reactions: list[ReactionOut]) -> Message
         is_edited=msg.is_edited,
         is_deleted=msg.is_deleted,
         is_system=msg.is_system,
+        importance=getattr(msg, "importance", "normal") or "normal",
         reactions=reactions,
         created_at=msg.created_at,
     )
@@ -136,13 +159,17 @@ async def send_message(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    await _ensure_member(db, chat_id, user.id)
+    cm = await _ensure_member(db, chat_id, user.id)
+    await _ensure_can_post(db, chat_id, user, cm)
     text = (data.text or "").strip()
     has_attachment = bool(data.attachment_kind and data.attachment_url)
     if not text and not has_attachment:
         raise HTTPException(status_code=400, detail="Пустое сообщение")
     if data.attachment_kind and data.attachment_kind not in ("image", "file"):
         raise HTTPException(status_code=400, detail="Недопустимый тип вложения")
+    importance = (data.importance or "normal").strip().lower()
+    if importance not in ("normal", "important", "critical"):
+        raise HTTPException(status_code=400, detail="Недопустимая важность сообщения")
     # attachment URLs must point at our own uploads (no SSRF/abuse)
     if has_attachment and not data.attachment_url.startswith("/uploads/"):
         raise HTTPException(status_code=400, detail="Недопустимый адрес вложения")
@@ -168,6 +195,7 @@ async def send_message(
         attachment_size=data.attachment_size if has_attachment else 0,
         attachment_w=data.attachment_w if has_attachment else 0,
         attachment_h=data.attachment_h if has_attachment else 0,
+        importance=importance,
     )
     db.add(msg)
     await db.commit()
@@ -186,7 +214,8 @@ async def forward_message(
 ):
     # chat_id is the source; data.to_chat_id is the destination
     await _ensure_member(db, chat_id, user.id)
-    await _ensure_member(db, data.to_chat_id, user.id)
+    dest_cm = await _ensure_member(db, data.to_chat_id, user.id)
+    await _ensure_can_post(db, data.to_chat_id, user, dest_cm)
     if not (await get_effective_permissions(db, user))["can_forward"]:
         raise HTTPException(status_code=403, detail="Ваша группа не может пересылать сообщения")
     src = (await db.execute(select(Message, User).join(User, User.id == Message.sender_id)
@@ -206,6 +235,7 @@ async def forward_message(
         attachment_size=smsg.attachment_size or 0,
         attachment_w=smsg.attachment_w or 0,
         attachment_h=smsg.attachment_h or 0,
+        importance=getattr(smsg, "importance", "normal") or "normal",
     )
     db.add(fwd)
     await db.commit()
@@ -228,6 +258,8 @@ async def edit_message(
         raise HTTPException(status_code=404, detail="Сообщение не найдено")
     if msg.sender_id != user.id:
         raise HTTPException(status_code=403, detail="Можно редактировать только свои сообщения")
+    cm = await _ensure_member(db, chat_id, user.id)
+    await _ensure_can_post(db, chat_id, user, cm)
     if not (await get_effective_permissions(db, user))["can_edit_own"]:
         raise HTTPException(status_code=403, detail="Ваша группа не может редактировать сообщения")
     msg.text = data.text
@@ -250,6 +282,10 @@ async def delete_message(
     msg = (await db.execute(select(Message).where(Message.id == message_id, Message.chat_id == chat_id))).scalar_one_or_none()
     if not msg:
         raise HTTPException(status_code=404, detail="Сообщение не найдено")
+    cm = await _ensure_member(db, chat_id, user.id)
+    chat = (await db.execute(select(Chat).where(Chat.id == chat_id))).scalar_one_or_none()
+    if chat and chat.type == "channel" and not cm.is_admin and user.role != "admin":
+        raise HTTPException(status_code=403, detail="В канал могут писать только администраторы")
     if msg.sender_id != user.id and user.role != "admin":
         raise HTTPException(status_code=403, detail="Нет прав на удаление")
     if msg.sender_id == user.id and user.role != "admin" and not (await get_effective_permissions(db, user))["can_delete_own"]:

@@ -164,6 +164,7 @@ class Message(Base):
     is_edited: Mapped[bool] = mapped_column(Boolean, default=False)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     is_system: Mapped[bool] = mapped_column(Boolean, default=False)
+    importance: Mapped[str] = mapped_column(String(16), default="normal")  # normal | important | critical
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     chat: Mapped["Chat"] = relationship(back_populates="messages")
@@ -178,6 +179,136 @@ class Reaction(Base):
     message_id: Mapped[int] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"), index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     emoji: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Calendar(Base):
+    """Personal/shared calendar."""
+    __tablename__ = "calendars"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(160), default="")
+    color: Mapped[str] = mapped_column(String(16), default="#3390ec")
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    is_shared: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    owner: Mapped["User"] = relationship()
+
+
+class CalendarMember(Base):
+    """Users that can see/edit a shared calendar."""
+    __tablename__ = "calendar_members"
+    __table_args__ = (UniqueConstraint("calendar_id", "user_id", name="uq_calendar_user"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    calendar_id: Mapped[int] = mapped_column(ForeignKey("calendars.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    can_edit: Mapped[bool] = mapped_column(Boolean, default=True)
+    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    calendar: Mapped["Calendar"] = relationship()
+    user: Mapped["User"] = relationship()
+
+
+class CalendarNote(Base):
+    """Personal calendar note/reminder."""
+    __tablename__ = "calendar_notes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    calendar_id: Mapped[int | None] = mapped_column(ForeignKey("calendars.id", ondelete="CASCADE"), nullable=True, index=True)
+    title: Mapped[str] = mapped_column(String(160), default="")
+    text: Mapped[str] = mapped_column(Text, default="")
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    color: Mapped[str] = mapped_column(String(16), default="#3390ec")
+    is_done: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    user: Mapped["User"] = relationship()
+    calendar: Mapped["Calendar"] = relationship()
+
+
+class CallEvent(Base):
+    """Telephony call event imported from IP PBX / Asterisk AMI."""
+    __tablename__ = "call_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    extension: Mapped[str] = mapped_column(String(32), default="", index=True)
+    caller_number: Mapped[str] = mapped_column(String(64), default="")
+    caller_name: Mapped[str] = mapped_column(String(128), default="")
+    direction: Mapped[str] = mapped_column(String(16), default="incoming")  # incoming | outgoing
+    status: Mapped[str] = mapped_column(String(16), default="ringing")      # ringing | answered | missed | ended
+    unique_id: Mapped[str] = mapped_column(String(128), default="", index=True)
+    linked_id: Mapped[str] = mapped_column(String(128), default="", index=True)
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    answered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    raw: Mapped[str] = mapped_column(Text, default="")
+
+    user: Mapped["User"] = relationship()
+
+
+class SupportTicket(Base):
+    """Support request visible to user and admins."""
+    __tablename__ = "support_tickets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    subject: Mapped[str] = mapped_column(String(180), default="")
+    category: Mapped[str] = mapped_column(String(32), default="general", index=True)
+    status: Mapped[str] = mapped_column(String(24), default="open", index=True)  # open | in_progress | waiting_user | resolved | closed
+    priority: Mapped[str] = mapped_column(String(16), default="normal")  # low | normal | high | critical
+    assigned_admin_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    user: Mapped["User"] = relationship(foreign_keys=[user_id])
+    assigned_admin: Mapped["User"] = relationship(foreign_keys=[assigned_admin_id])
+
+
+class SupportMessage(Base):
+    __tablename__ = "support_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("support_tickets.id", ondelete="CASCADE"), index=True)
+    sender_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    sender_role: Mapped[str] = mapped_column(String(16), default="user")  # user | admin
+    text: Mapped[str] = mapped_column(Text, default="")
+    is_read_by_user: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_read_by_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    ticket: Mapped["SupportTicket"] = relationship()
+    sender: Mapped["User"] = relationship()
+
+
+class SupportTemplate(Base):
+    __tablename__ = "support_templates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[str] = mapped_column(String(160), default="")
+    text: Mapped[str] = mapped_column(Text, default="")
+    category: Mapped[str] = mapped_column(String(32), default="general", index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    creator: Mapped["User"] = relationship()
+
+
+class DownloadEvent(Base):
+    """File preview/download audit history."""
+    __tablename__ = "download_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    username: Mapped[str] = mapped_column(String(128), default="")
+    file_url: Mapped[str] = mapped_column(String(255), default="", index=True)
+    file_name: Mapped[str] = mapped_column(String(255), default="")
+    action: Mapped[str] = mapped_column(String(32), default="preview")  # preview | download | open
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

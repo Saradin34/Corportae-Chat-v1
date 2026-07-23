@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     LDAP_NETBIOS: str = ""
     # Attribute used as the login name (sAMAccountName for AD).
     LDAP_LOGIN_ATTR: str = "sAMAccountName"
+    # Optional bind mechanism override. Leave empty for the normal AD flow:
+    # SIMPLE for user@domain and NTLM for DOMAIN\\user. Set to NEGOTIATE only
+    # when Kerberos/GSSAPI is deliberately configured in the container.
+    LDAP_AUTH_MECHANISM: str = ""
     # Service account for searching the directory (group membership, profile).
     # Leave empty to use the just-authenticated user's own credentials.
     LDAP_BIND_DN: str = ""
@@ -68,6 +72,21 @@ class Settings(BaseSettings):
     LDAP_GROUP_FILTER: str = ""
     # Ignore well-known builtin AD groups that aren't useful as chats.
     LDAP_GROUP_EXCLUDE: str = "Domain Users,Domain Computers,Domain Guests"
+    # ---------- IP PBX / Asterisk AMI ----------
+    AMI_ENABLED: bool = False
+    AMI_HOST: str = "192.168.30.1"
+    AMI_PORT: int = 5038
+    AMI_USERNAME: str = ""
+    AMI_SECRET: str = ""
+    AMI_RECONNECT_SECONDS: int = 5
+    AMI_DEBUG_EVENTS: bool = False
+    # Originate settings for 1:1 click-to-call. For Asterisk PJSIP use
+    # PJSIP/{ext}; for chan_sip use SIP/{ext}; for dialplan callback you can
+    # set Local/{ext}@from-internal and adjust context/exten below.
+    AMI_ORIGINATE_CHANNEL_TEMPLATE: str = "PJSIP/{ext}"
+    AMI_ORIGINATE_CONTEXT: str = "from-internal"
+    AMI_ORIGINATE_PRIORITY: int = 1
+    AMI_ORIGINATE_TIMEOUT_MS: int = 30000
 
     # ---------- SSO (NTLM / Kerberos / Reverse Proxy) ----------
     SSO_ENABLED: bool = False

@@ -101,6 +101,7 @@ class ChatOut(BaseModel):
     last_message_at: Optional[datetime] = None
     unread: int = 0
     is_muted: bool = False
+    last_read_message_id: int = 0
     members: list["ChatMemberOut"] = Field(default_factory=list)
 
 
@@ -135,6 +136,7 @@ class CreateMessageRequest(BaseModel):
     attachment_size: int = 0
     attachment_w: int = 0
     attachment_h: int = 0
+    importance: str = "normal"  # normal | important | critical
 
 
 class ForwardMessageRequest(BaseModel):
@@ -175,6 +177,7 @@ class MessageOut(BaseModel):
     is_edited: bool
     is_deleted: bool
     is_system: bool = False
+    importance: str = "normal"
     reactions: list[ReactionOut] = Field(default_factory=list)
     created_at: datetime
 
@@ -327,6 +330,199 @@ class UploadResult(BaseModel):
 
 class AvatarResult(BaseModel):
     avatar_url: str
+
+
+class DocumentPreviewRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=255)
+    name: str = Field(default="", max_length=255)
+
+
+class DocumentPreviewOut(BaseModel):
+    kind: str = "html"  # html | pdf | image | unsupported
+    html: str = ""
+    url: str = ""
+    name: str = ""
+    warnings: list[str] = Field(default_factory=list)
+
+
+class DownloadLogRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=255)
+    name: str = Field(default="", max_length=255)
+    action: str = Field(default="preview", max_length=32)
+
+
+
+
+class SupportMessageOut(BaseModel):
+    id: int
+    ticket_id: int
+    sender_id: Optional[int] = None
+    sender_name: str = ""
+    sender_role: str = "user"
+    text: str
+    is_read_by_user: bool = False
+    is_read_by_admin: bool = False
+    created_at: datetime
+
+
+class SupportTicketOut(BaseModel):
+    id: int
+    user_id: int
+    user_name: str = ""
+    subject: str
+    category: str = "general"
+    status: str = "open"
+    priority: str = "normal"
+    assigned_admin_id: Optional[int] = None
+    assigned_admin_name: str = ""
+    unread: int = 0
+    last_message: str = ""
+    created_at: datetime
+    updated_at: datetime
+
+
+class SupportCreateRequest(BaseModel):
+    subject: str = Field(min_length=1, max_length=180)
+    text: str = Field(min_length=1, max_length=4000)
+    category: str = Field(default="general", max_length=32)
+    priority: str = Field(default="normal", max_length=16)
+
+
+class SupportReplyRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+
+
+class SupportStatusRequest(BaseModel):
+    status: str = Field(pattern=r"^(open|in_progress|waiting_user|pending|resolved|closed)$")
+
+
+class SupportAssignRequest(BaseModel):
+    admin_id: Optional[int] = None
+
+
+class SupportTemplateOut(BaseModel):
+    id: int
+    title: str
+    text: str
+    category: str = "general"
+    is_active: bool = True
+    created_by: Optional[int] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class SupportTemplateCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    text: str = Field(min_length=1, max_length=4000)
+    category: str = Field(default="general", max_length=32)
+
+
+class SupportTemplateUpdate(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=160)
+    text: Optional[str] = Field(default=None, min_length=1, max_length=4000)
+    category: Optional[str] = Field(default=None, max_length=32)
+    is_active: Optional[bool] = None
+
+
+class CalendarOut(BaseModel):
+    id: int
+    name: str
+    color: str = "#3390ec"
+    owner_id: int
+    is_shared: bool = False
+    member_ids: list[int] = Field(default_factory=list)
+    can_edit: bool = True
+
+    class Config:
+        from_attributes = True
+
+
+class CalendarCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    color: str = Field(default="#3390ec", max_length=16)
+    member_ids: list[int] = Field(default_factory=list)
+
+
+class CalendarUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=160)
+    color: Optional[str] = Field(default=None, max_length=16)
+    member_ids: Optional[list[int]] = None
+
+
+class CalendarNoteCreate(BaseModel):
+    calendar_id: Optional[int] = None
+    title: str = Field(min_length=1, max_length=160)
+    text: str = Field(default="", max_length=2000)
+    starts_at: datetime
+    color: str = Field(default="#3390ec", max_length=16)
+
+
+class CalendarNoteUpdate(BaseModel):
+    calendar_id: Optional[int] = None
+    title: Optional[str] = Field(default=None, min_length=1, max_length=160)
+    text: Optional[str] = Field(default=None, max_length=2000)
+    starts_at: Optional[datetime] = None
+    color: Optional[str] = Field(default=None, max_length=16)
+    is_done: Optional[bool] = None
+
+
+class CalendarNoteOut(BaseModel):
+    id: int
+    user_id: int
+    calendar_id: Optional[int] = None
+    calendar_name: str = ""
+    calendar_color: str = ""
+    title: str
+    text: str = ""
+    starts_at: datetime
+    color: str = "#3390ec"
+    is_done: bool = False
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class OriginateCallRequest(BaseModel):
+    to_user_id: int
+
+
+class CallEventOut(BaseModel):
+    id: int
+    user_id: Optional[int] = None
+    extension: str = ""
+    caller_number: str = ""
+    caller_name: str = ""
+    caller_display: str = ""
+    callee_name: str = ""
+    callee_number: str = ""
+    callee_display: str = ""
+    call_summary: str = ""
+    direction: str = "incoming"
+    status: str = "ringing"
+    unique_id: str = ""
+    linked_id: str = ""
+    is_read: bool = False
+    started_at: datetime
+    answered_at: Optional[datetime] = None
+    ended_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+class DownloadEventOut(BaseModel):
+    id: int
+    user_id: Optional[int] = None
+    username: str = ""
+    file_url: str = ""
+    file_name: str = ""
+    action: str = ""
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
 
 
 ChatOut.model_rebuild()

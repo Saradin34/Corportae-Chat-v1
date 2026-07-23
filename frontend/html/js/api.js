@@ -110,6 +110,9 @@
     uploadFile: (file, onProgress) => upload("/uploads/file", file, onProgress),
     uploadAvatar: (file, onProgress) => upload("/uploads/avatar", file, onProgress),
     uploadChatAvatar: (chatId, file, onProgress) => upload("/uploads/chat/" + chatId + "/avatar", file, onProgress),
+    previewDocument: (url, name) => request("POST", "/uploads/preview", { url, name: name || "" }),
+    logDownload: (url, name, action) => request("POST", "/uploads/download-log", { url, name: name || "", action: action || "download" }),
+    downloadHistory: (url, limit) => request("GET", "/uploads/download-history?url=" + encodeURIComponent(url || "") + "&limit=" + (limit || 30)),
     // auth
     register: (d) => request("POST", "/auth/register", d),
     login: (d) => request("POST", "/auth/login", d),
@@ -125,12 +128,43 @@
     authConfig: () => request("GET", "/auth/config"),
     me: () => request("GET", "/auth/me"),
     // users
-    searchUsers: (q) => request("GET", "/users?q=" + encodeURIComponent(q || "")),
+    searchUsers: (q, limit) => request("GET", "/users?q=" + encodeURIComponent(q || "") + "&limit=" + (limit || 1000)),
     listUsers: (q, limit) => request("GET", "/users?q=" + encodeURIComponent(q || "") + "&limit=" + (limit || 1000)),
     myPermissions: () => request("GET", "/users/me/permissions"),
     getUser: (id) => request("GET", "/users/" + id),
+    orgTree: () => request("GET", "/users/org/tree"),
     updateMe: (d) => request("PATCH", "/users/me", d),
     changePassword: (d) => request("POST", "/auth/change-password", d),
+    // support
+    supportMeta: () => request("GET", "/support/meta"),
+    supportTickets: () => request("GET", "/support"),
+    supportCreate: (d) => request("POST", "/support", d),
+    supportMessages: (id) => request("GET", "/support/" + id + "/messages"),
+    supportReply: (id, text) => request("POST", "/support/" + id + "/reply", { text }),
+    supportSetStatus: (id, status) => request("POST", "/support/" + id + "/status", { status }),
+    supportAssign: (id, adminId) => request("POST", "/support/" + id + "/assign", { admin_id: adminId || null }),
+    supportTemplates: (category) => request("GET", "/support/templates?category=" + encodeURIComponent(category || "")),
+    supportCreateTemplate: (d) => request("POST", "/support/templates", d),
+    supportUpdateTemplate: (id, d) => request("PATCH", "/support/templates/" + id, d),
+    supportDeleteTemplate: (id) => request("DELETE", "/support/templates/" + id),
+    supportAdminTickets: (status, category) => request("GET", "/support/admin/list?status=" + encodeURIComponent(status || "") + "&category=" + encodeURIComponent(category || "")),
+    // calendar
+    calendars: () => request("GET", "/calendar/calendars"),
+    createCalendar: (d) => request("POST", "/calendar/calendars", d),
+    updateCalendar: (id, d) => request("PATCH", "/calendar/calendars/" + id, d),
+    deleteCalendar: (id) => request("DELETE", "/calendar/calendars/" + id),
+    calendarNotes: (start, end, calendarId) => request("GET", "/calendar?start=" + encodeURIComponent(start || "") + "&end=" + encodeURIComponent(end || "") + (calendarId ? "&calendar_id=" + encodeURIComponent(calendarId) : "")),
+    createCalendarNote: (d) => request("POST", "/calendar", d),
+    updateCalendarNote: (id, d) => request("PATCH", "/calendar/" + id, d),
+    deleteCalendarNote: (id) => request("DELETE", "/calendar/" + id),
+    // calls
+    listCalls: (status, limit) => request("GET", "/calls?status=" + encodeURIComponent(status || "") + "&limit=" + (limit || 100)),
+    missedCalls: (limit) => request("GET", "/calls/missed?limit=" + (limit || 100)),
+    missedCallsUnreadCount: () => request("GET", "/calls/unread-count"),
+    markCallRead: (id) => request("POST", "/calls/" + id + "/read"),
+    markAllCallsRead: () => request("POST", "/calls/read-all"),
+    originateCall: (toUserId) => request("POST", "/calls/originate", { to_user_id: toUserId }),
+    adminCalls: (limit) => request("GET", "/calls/admin?limit=" + (limit || 200)),
     // chats
     listChats: () => request("GET", "/chats"),
     createChat: (d) => request("POST", "/chats", d),
@@ -160,9 +194,21 @@
     forwardMessage: (chatId, mid, toChatId) => request("POST", "/chats/" + chatId + "/messages/forward", { message_id: mid, to_chat_id: toChatId }),
     // admin
     adminStats: () => request("GET", "/admin/stats"),
+    adminDiagConfig: () => request("GET", "/admin/diagnostics/config"),
+    adminDiagKeytab: () => request("GET", "/admin/diagnostics/keytab"),
+    adminDiagLdapBind: () => request("POST", "/admin/diagnostics/ldap-bind"),
+    adminDiagLdapUser: (q) => request("GET", "/admin/diagnostics/ldap-user?q=" + encodeURIComponent(q || "")),
+    adminDiagLdapGroup: (q) => request("GET", "/admin/diagnostics/ldap-group?q=" + encodeURIComponent(q || "")),
+    adminDiagSpn: () => request("GET", "/admin/diagnostics/spn"),
+    adminCleanupHistory: (target, period) => request("DELETE", "/admin/cleanup?target=" + encodeURIComponent(target) + "&period=" + encodeURIComponent(period || "all")),
+    adminAnalytics: () => request("GET", "/admin/analytics"),
+    adminSystemHealth: () => request("GET", "/admin/system/health"),
     adminUsers: (q) => request("GET", "/admin/users?q=" + encodeURIComponent(q || "")),
+    adminUserSummary: (id) => request("GET", "/admin/users/" + id + "/summary"),
     adminToggleActive: (id) => request("POST", "/admin/users/" + id + "/toggle-active"),
     adminSetRole: (id, role) => request("POST", "/admin/users/" + id + "/role?role=" + role),
+    adminImpersonate: (id) => request("POST", "/admin/users/" + id + "/impersonate"),
+    adminForceLogout: (id) => request("POST", "/admin/users/" + id + "/force-logout"),
     adminResetPassword: (id, pwd) => request("POST", "/admin/users/" + id + "/reset-password?new_password=" + encodeURIComponent(pwd)),
     adminDeleteUser: (id) => request("DELETE", "/admin/users/" + id),
     adminChats: () => request("GET", "/admin/chats"),
@@ -177,6 +223,7 @@
     adminAssignGroup: (userIds, groupId) => request("POST", "/admin/groups/assign", { user_ids: userIds, group_id: groupId }),
     adminAdSearchGroups: (q) => request("GET", "/admin/groups/ad/search?q=" + encodeURIComponent(q || "")),
     adminAdImportGroup: (dn, name) => request("POST", "/admin/groups/ad/import", { dn, name: name || "" }),
+    adminAdSyncGroup: (id) => request("POST", "/admin/groups/" + id + "/ad/sync"),
     // admin: server settings
     adminGetSettings: () => request("GET", "/admin/settings"),
     adminUpdateSettings: (d) => request("PATCH", "/admin/settings", d),
@@ -199,3 +246,67 @@
     }, 3000);
   };
 })();
+
+
+  // ---- App modal dialogs (mobile/desktop friendly replacement for confirm/prompt) ----
+  function closeAppDialog() {
+    const o = document.getElementById("app-dialog-overlay");
+    if (o) o.remove();
+  }
+
+  window.uiConfirm = function (message, title) {
+    return new Promise((resolve) => {
+      closeAppDialog();
+      const o = document.createElement("div");
+      o.id = "app-dialog-overlay";
+      o.className = "app-dialog-overlay";
+      o.innerHTML = `
+        <div class="app-dialog" role="dialog" aria-modal="true">
+          <h3>${escapeDlg(title || "Подтверждение")}</h3>
+          <p>${escapeDlg(message || "")}</p>
+          <div class="app-dialog-actions">
+            <button class="btn-secondary" id="dlg-cancel">Отмена</button>
+            <button class="btn-danger" id="dlg-ok">Подтвердить</button>
+          </div>
+        </div>`;
+      document.body.appendChild(o);
+      const done = (v) => { closeAppDialog(); resolve(v); };
+      o.querySelector("#dlg-cancel").onclick = () => done(false);
+      o.querySelector("#dlg-ok").onclick = () => done(true);
+      o.onclick = (e) => { if (e.target === o) done(false); };
+      document.addEventListener("keydown", function esc(e) { if (e.key === "Escape") { document.removeEventListener("keydown", esc); done(false); } }, { once: true });
+    });
+  };
+
+  window.uiPrompt = function (opts) {
+    opts = typeof opts === "string" ? { message: opts } : (opts || {});
+    return new Promise((resolve) => {
+      closeAppDialog();
+      const o = document.createElement("div");
+      o.id = "app-dialog-overlay";
+      o.className = "app-dialog-overlay";
+      const isText = !!opts.textarea;
+      o.innerHTML = `
+        <div class="app-dialog" role="dialog" aria-modal="true">
+          <h3>${escapeDlg(opts.title || "Введите значение")}</h3>
+          ${opts.message ? `<p>${escapeDlg(opts.message)}</p>` : ""}
+          ${isText ? `<textarea id="dlg-input" placeholder="${escapeDlg(opts.placeholder || "")}">${escapeDlg(opts.value || "")}</textarea>` : `<input id="dlg-input" type="${escapeDlg(opts.type || "text")}" placeholder="${escapeDlg(opts.placeholder || "")}" value="${escapeDlg(opts.value || "")}" />`}
+          <div class="app-dialog-actions">
+            <button class="btn-secondary" id="dlg-cancel">Отмена</button>
+            <button class="btn-primary inline" id="dlg-ok">OK</button>
+          </div>
+        </div>`;
+      document.body.appendChild(o);
+      const input = o.querySelector("#dlg-input");
+      setTimeout(() => { input && input.focus(); }, 60);
+      const done = (v) => { closeAppDialog(); resolve(v); };
+      o.querySelector("#dlg-cancel").onclick = () => done(null);
+      o.querySelector("#dlg-ok").onclick = () => done((input.value || "").trim());
+      o.onclick = (e) => { if (e.target === o) done(null); };
+      input.addEventListener("keydown", (e) => { if (!isText && e.key === "Enter") done((input.value || "").trim()); });
+    });
+  };
+
+  function escapeDlg(s) {
+    return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }

@@ -8,7 +8,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..config import settings
 from ..database import get_db
 from ..models import GROUP_PERMISSIONS, AuditLog, Chat, ChatMember, Group, User
 from ..schemas import (
@@ -263,6 +262,52 @@ async def assign_users(
     gname = target_group.name if target_group else DEFAULT_GROUP_NAME
     await _log(db, admin, "assign_group", f"group={gname} users={len(users)}")
     return {"ok": True, "updated": len(users)}
+
+
+@router.post("/{group_id}/ad/sync")
+async def ad_sync_group(
+    group_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Refresh members/profile fields for an app group linked to an AD group."""
+    from .. import ldap_auth
+
+    group = (await db.execute(select(Group).where(Group.id == group_id))).scalar_one_or_none()
+    if not group:
+        raise HTTPException(status_code=404, detail="Группа не найдена")
+    if not group.ad_group_dn:
+        raise HTTPException(status_code=400, detail="Группа не связана с Active Directory")
+    try:
+        ad_members = ldap_auth.group_members(group.ad_group_dn)
+    except ldap_auth.LdapError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Ошибка обращения к AD: {e}")
+
+    before_ids = set((await db.execute(select(User.id).where(User.group_id == group.id))).scalars().all())
+    synced_ids = set()
+    created_users = 0
+    for ad_user in ad_members:
+        user, created = await _upsert_ad_user(db, ad_user)
+        if created:
+            created_users += 1
+        user.group_id = group.id
+        synced_ids.add(user.id)
+
+    removed = before_ids - synced_ids
+    for uid in removed:
+        u = (await db.execute(select(User).where(User.id == uid))).scalar_one_or_none()
+        # Only detach AD users that are no longer in the AD group; local/manual
+        # users are left untouched to avoid accidental removal.
+        if u and u.auth_source == "ldap":
+            u.group_id = None
+
+    await db.commit()
+    await _sync_group_chat_members(db, group)
+    await db.commit()
+    await _log(db, admin, "sync_ad_group", f"group={group.name} members={len(ad_members)} created={created_users} removed={len(removed)}")
+    return {"ok": True, "group_id": group.id, "members": len(ad_members), "created_users": created_users, "detached_missing": len(removed)}
 
 
 # ============================================================

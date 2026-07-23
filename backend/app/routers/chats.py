@@ -64,6 +64,7 @@ def _build_chat_out(chat: Chat, current_user: User, member_rows, last_msg, my_me
         last_message_at=(last_msg.created_at if last_msg else None),
         unread=unread,
         is_muted=(my_membership.is_muted if my_membership else False),
+        last_read_message_id=(my_membership.last_read_message_id if my_membership else 0),
         members=members,
     )
 
@@ -137,6 +138,7 @@ async def _serialize_chat(db: AsyncSession, chat: Chat, current_user: User) -> C
         last_message_at=(last_msg.created_at if last_msg else None),
         unread=unread,
         is_muted=(my_membership.is_muted if my_membership else False),
+        last_read_message_id=(my_membership.last_read_message_id if my_membership else 0),
         members=members,
     )
 
@@ -253,7 +255,20 @@ async def create_chat(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    if data.type not in ("private", "group", "channel"):
+        raise HTTPException(status_code=400, detail="Недопустимый тип чата")
+
     member_ids = set(data.member_ids) | {user.id}
+
+    # Announcement channels are special: every global application admin must be
+    # able to publish there, not only the user who created the channel.  Add all
+    # active global admins as channel members/admins at creation time.
+    admin_ids: set[int] = set()
+    if data.type == "channel":
+        admin_ids = set((
+            await db.execute(select(User.id).where(User.role == "admin", User.is_active == True))  # noqa: E712
+        ).scalars().all())
+        member_ids |= admin_ids
 
     # ---- group permission enforcement ----
     perms = await get_effective_permissions(db, user)
@@ -286,7 +301,10 @@ async def create_chat(
     db.add(chat)
     await db.flush()
     for mid in member_ids:
-        db.add(ChatMember(chat_id=chat.id, user_id=mid, is_admin=(mid == user.id)))
+        # In channels, all global application admins are channel admins too, so
+        # they can publish announcements even if they did not create the channel.
+        is_chat_admin = (mid == user.id) or (data.type == "channel" and mid in admin_ids)
+        db.add(ChatMember(chat_id=chat.id, user_id=mid, is_admin=is_chat_admin))
     await db.commit()
     await db.refresh(chat)
 
@@ -360,7 +378,7 @@ async def add_members(
             continue
         u = (await db.execute(select(User).where(User.id == mid))).scalar_one_or_none()
         if u:
-            db.add(ChatMember(chat_id=chat_id, user_id=mid))
+            db.add(ChatMember(chat_id=chat_id, user_id=mid, is_admin=(chat.type == "channel" and u.role == "admin")))
             added_names.append(u.full_name or u.username)
     await db.commit()
 

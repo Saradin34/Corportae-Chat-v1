@@ -14,6 +14,13 @@
   // Apply saved user preferences (font size / compact) as early as possible.
   try {
     const prefs = JSON.parse(localStorage.getItem("cc_prefs") || "{}");
+    const fontStacks = {
+      segoe: '"Segoe UI", "Segoe UI Variable", system-ui, -apple-system, BlinkMacSystemFont, Roboto, Arial, sans-serif',
+      system: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif',
+      inter: 'Inter, "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, Roboto, Arial, sans-serif',
+      roboto: 'Roboto, "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, Arial, sans-serif',
+    };
+    document.documentElement.style.setProperty("--app-font", fontStacks[prefs.fontFamily] || fontStacks.segoe);
     if (prefs.fontSize) document.documentElement.style.setProperty("--msg-font-size", prefs.fontSize + "px");
     if (prefs.compact) document.body.classList.add("compact-mode");
     if (prefs.bubbleStyle === "square") document.body.classList.add("bubbles-square");

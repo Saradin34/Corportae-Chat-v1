@@ -33,8 +33,8 @@ if (!gotLock) {
 
 function loadConfig() {
   try {
-    return Object.assign({ server: "", keepInTray: true, noProxy: false }, JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8")));
-  } catch (e) { return { server: "", keepInTray: true, noProxy: false }; }
+    return Object.assign({ server: "", keepInTray: true, noProxy: false, clearCacheOnStart: true }, JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8")));
+  } catch (e) { return { server: "", keepInTray: true, noProxy: false, clearCacheOnStart: true }; }
 }
 function saveConfig(patch) {
   const cfg = Object.assign(loadConfig(), patch);
@@ -72,6 +72,15 @@ function createWindow() {
     return { action: "allow" };
   });
 
+  // Native right-click edit menu for inputs/textareas/contenteditable areas.
+  // Gives desktop users the expected Undo/Redo/Cut/Copy/Paste/Delete/Select All
+  // menu instead of the browser's inconsistent default.
+  mainWindow.webContents.on("context-menu", (event, params) => {
+    if (params.isEditable || (params.selectionText && params.selectionText.length)) {
+      buildEditorContextMenu(params).popup({ window: mainWindow });
+    }
+  });
+
   /* ---- The key behaviour ----
      If "keep in tray" is ON (default): [X] while visible → minimize to taskbar;
      a close that arrives while minimized (taskbar → "Закрыть окно") → real close.
@@ -98,6 +107,43 @@ function showWindow() {
   mainWindow.focus();
 }
 
+function sendShortcut(key, modifiers) {
+  if (!mainWindow) return;
+  try {
+    mainWindow.webContents.sendInputEvent({ type: "keyDown", keyCode: key, modifiers: modifiers || ["control"] });
+    mainWindow.webContents.sendInputEvent({ type: "keyUp", keyCode: key, modifiers: modifiers || ["control"] });
+  } catch (e) {}
+}
+
+function buildEditorContextMenu(params) {
+  const isEditable = !!params.isEditable;
+  const hasSelection = !!(params.selectionText && params.selectionText.length);
+  const template = [
+    { label: "Отменить", role: "undo", accelerator: "Ctrl+Z", enabled: isEditable },
+    { label: "Повторить", role: "redo", accelerator: "Ctrl+Y", enabled: isEditable },
+    { type: "separator" },
+    { label: "Вырезать", role: "cut", accelerator: "Ctrl+X", enabled: isEditable && hasSelection },
+    { label: "Копировать", role: "copy", accelerator: "Ctrl+C", enabled: hasSelection },
+    { label: "Вставить", role: "paste", accelerator: "Ctrl+V", enabled: isEditable },
+    { label: "Удалить", role: "delete", accelerator: "Del", enabled: isEditable && hasSelection },
+    { type: "separator" },
+    {
+      label: "Форматирование",
+      enabled: isEditable,
+      submenu: [
+        { label: "Жирный", accelerator: "Ctrl+B", click: () => sendShortcut("B") },
+        { label: "Курсив", accelerator: "Ctrl+I", click: () => sendShortcut("I") },
+        { label: "Подчёркнутый", accelerator: "Ctrl+U", click: () => sendShortcut("U") },
+        { type: "separator" },
+        { label: "Моноширинный", accelerator: "Ctrl+Shift+M", click: () => sendShortcut("M", ["control", "shift"]) },
+      ],
+    },
+    { type: "separator" },
+    { label: "Выбрать всё", role: "selectAll", accelerator: "Ctrl+A", enabled: isEditable || hasSelection },
+  ];
+  return Menu.buildFromTemplate(template);
+}
+
 function loadApp(server) {
   const url = normalizeServer(server);
   mainWindow.loadURL(url).catch(() => showConnError(url));
@@ -111,6 +157,38 @@ function normalizeServer(s) {
   s = (s || "").trim().replace(/\/+$/, "");
   if (!/^https?:\/\//.test(s)) s = "http://" + s;
   return s;
+}
+
+
+async function clearWebCache() {
+  try { await session.defaultSession.clearCache(); } catch (e) {}
+  try { await session.defaultSession.clearStorageData({ storages: ["serviceworkers", "cachestorage"] }); } catch (e) {}
+}
+
+function hardReload() {
+  if (!mainWindow) return;
+  clearWebCache().finally(() => {
+    try { mainWindow.webContents.reloadIgnoringCache(); }
+    catch (e) { try { mainWindow.reload(); } catch (e2) {} }
+  });
+}
+
+function currentServer() {
+  return normalizeServer(loadConfig().server || DEFAULT_SERVER);
+}
+
+async function changeServerDialog() {
+  const cfg = loadConfig();
+  const res = await dialog.showMessageBox(mainWindow, {
+    type: "question",
+    title: "Сменить сервер",
+    message: "Открыть экран настройки адреса сервера?",
+    detail: "Текущий адрес: " + (cfg.server || "не задан") + "\nПосле сохранения приложение перезагрузит веб-интерфейс.",
+    buttons: ["Открыть настройку", "Отмена"],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (res.response === 0) loadSetup();
 }
 
 function showConnError(url) {
@@ -165,8 +243,10 @@ function buildMenu() {
     {
       label: "Файл",
       submenu: [
-        { label: "Сменить сервер…", click: () => loadSetup() },
+        { label: "Сменить сервер…", click: () => changeServerDialog() },
         { label: "Перезагрузить", accelerator: "CmdOrCtrl+R", click: () => mainWindow && mainWindow.reload() },
+        { label: "Жёстко обновить (очистить кэш)", accelerator: "CmdOrCtrl+Shift+R", click: () => hardReload() },
+        { label: "Очистить кэш", click: async () => { await clearWebCache(); dialog.showMessageBox(mainWindow, { message: "Кэш очищен", type: "info" }); } },
         { label: "Свернуть", accelerator: "CmdOrCtrl+M", click: () => mainWindow && mainWindow.minimize() },
         { type: "separator" },
         { label: "Закрыть приложение", accelerator: "CmdOrCtrl+Q", click: () => { isQuitting = true; app.quit(); } },
@@ -249,8 +329,11 @@ ipcMain.handle("app:get-state", () => {
   const cfg = loadConfig();
   let openAtLogin = false;
   try { openAtLogin = app.getLoginItemSettings().openAtLogin; } catch (e) {}
-  return { server: cfg.server, keepInTray: cfg.keepInTray !== false, noProxy: !!cfg.noProxy, autostart: openAtLogin };
+  return { server: cfg.server, keepInTray: cfg.keepInTray !== false, noProxy: !!cfg.noProxy, autostart: openAtLogin, clearCacheOnStart: cfg.clearCacheOnStart !== false, appVersion: app.getVersion() };
 });
+ipcMain.handle("app:hard-reload", async () => { hardReload(); return { ok: true }; });
+ipcMain.handle("app:clear-cache", async () => { await clearWebCache(); return { ok: true }; });
+ipcMain.handle("app:change-server", async () => { await changeServerDialog(); return { ok: true }; });
 
 // ---- Unread badge + taskbar highlight ----
 // A small red-dot PNG overlay icon (SVG is not rasterized by nativeImage on
@@ -302,16 +385,27 @@ ipcMain.handle("app:clear-flash", () => {
   return { ok: true };
 });
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // grant notifications (used by the web app)
   session.defaultSession.setPermissionRequestHandler((wc, permission, callback) => {
-    callback(permission === "notifications");
+    callback(permission === "notifications" || permission === "media");
+  });
+  // Make the desktop shell prefer fresh server assets. Server still controls
+  // auth/localStorage; we only prevent stale JS/CSS/service-worker cache.
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    const headers = Object.assign({}, details.responseHeaders || {});
+    if (/\/(js|css)\//.test(details.url) || /\.(js|css)(\?|$)/.test(details.url) || details.url.endsWith("/index.html")) {
+      headers["Cache-Control"] = ["no-store, no-cache, must-revalidate"];
+      headers["Pragma"] = ["no-cache"];
+    }
+    callback({ responseHeaders: headers });
   });
   // apply persisted proxy preference on launch
   const cfg = loadConfig();
   try {
     session.defaultSession.setProxy({ mode: cfg.noProxy ? "direct" : "system" });
   } catch (e) {}
+  if (cfg.clearCacheOnStart !== false) await clearWebCache();
 
   createWindow();
 

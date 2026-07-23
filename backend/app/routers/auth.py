@@ -238,8 +238,17 @@ async def _complete_sso_login(username: str, db: AsyncSession) -> TokenResponse:
         await db.refresh(user)
         logger.info("JIT-provisioned SSO user '%s' role=%s", username, role)
     else:
+        changed = False
         if user.auth_source not in ("sso", "ldap"):
-            user.auth_source = "sso"
+            user.auth_source = "sso"; changed = True
+        if ldap_info:
+            if ldap_info.get("full_name") and user.full_name != ldap_info.get("full_name"):
+                user.full_name = ldap_info.get("full_name"); changed = True
+            for field in ("title", "phone", "office"):
+                val = ldap_info.get(field, "")
+                if val and getattr(user, field) != val:
+                    setattr(user, field, val); changed = True
+        if changed:
             await db.commit()
             await db.refresh(user)
 

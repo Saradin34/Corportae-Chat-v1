@@ -14,6 +14,7 @@
 
   const State = {
     chats: [],
+    chatFilter: localStorage.getItem("cc_chat_filter") || "all",
     activeChatId: null,
     activeChat: null,
     messages: [],
@@ -24,12 +25,20 @@
     replyTo: null,
     editingId: null,
     forwardMsgId: null,
+    selectionMode: false,
+    selectedMessageIds: new Set(),
+    composerImportance: "normal",
     pendingAttachments: [],  // [{tempId, file, kind, status, progress, result}]
+    recentFileDrops: {},     // file signature -> timestamp; prevents duplicate drag/drop events
+    missedCallsUnread: 0,    // unread missed calls, shown like unread messages
+    recentIncomingCalls: {},  // callId/key -> timestamp, suppress duplicate AMI popups
+    recentMissedCalls: {},    // callId/key -> timestamp, suppress duplicate missed toasts
     allUsers: [],
     rsRefreshTimer: null,
     ws: null,
     wsReconnectTimer: null,
     wsReconnectDelay: 1000,
+    webCall: null,       // WebRTC audio call state
     me: null,
     statusMap: {},        // userId -> "online" | "away" | "offline"
     myStatus: "online",
@@ -47,6 +56,166 @@
 
   // Convenience: check a permission flag.
   function can(flag) { return State.perms ? State.perms[flag] !== false : true; }
+
+  // Local Material-like SVG icons. No React/MUI runtime and no external CDN:
+  // works in web, desktop Electron and mobile/PWA preview offline.
+  const ICON_PATHS = {
+    menu: "M3 6h18v2H3V6Zm0 5h18v2H3v-2Zm0 5h18v2H3v-2Z",
+    chat: "M4 4h16c1.1 0 2 .9 2 2v10c0 1.1-.9 2-2 2H7l-5 4V6c0-1.1.9-2 2-2Zm0 2v11l2.3-2H20V6H4Z",
+    home: "M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8h5Z",
+    contacts: "M20 0H4v2h16V0ZM4 24h16v-2H4v2ZM20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2ZM8 8.75c1.24 0 2.25 1.01 2.25 2.25S9.24 13.25 8 13.25 5.75 12.24 5.75 11 6.76 8.75 8 8.75ZM12.5 17h-9v-.75C3.5 14.75 6.5 14 8 14s4.5.75 4.5 2.25V17Zm8-1.5h-6V14h6v1.5Zm0-3h-6V11h6v1.5Zm0-3h-6V8h6v1.5Z",
+    phone: "M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1C10.61 21 3 13.39 3 4c0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.24.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2Z",
+    phoneMissed: "m19.59 7-4.95 4.95-3.54-3.54-6.3 6.3L3.39 13.3l7.71-7.7 3.54 3.54L18.17 5H15V3h7v7h-2V6.41L19.59 7ZM6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1C10.61 21 3 13.39 3 4c0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.24.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2Z",
+    check: "M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2Z",
+    calendar: "M7 2v2H5c-1.11 0-1.99.9-1.99 2L3 20c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-2V2h-2v2H9V2H7Zm12 18H5V10h14v10ZM5 8V6h14v2H5Z",
+    edit: "M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25ZM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.996.996 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83Z",
+    theme: "M12 3c-4.97 0-9 4.03-9 9s4.03 9 9 9c.83 0 1.5-.67 1.5-1.5 0-.39-.15-.74-.39-1.01-.23-.26-.38-.61-.38-.99 0-.83.67-1.5 1.5-1.5H16c2.76 0 5-2.24 5-5 0-4.42-4.03-8-9-8ZM6.5 12C5.67 12 5 11.33 5 10.5S5.67 9 6.5 9 8 9.67 8 10.5 7.33 12 6.5 12Zm3-4C8.67 8 8 7.33 8 6.5S8.67 5 9.5 5s1.5.67 1.5 1.5S10.33 8 9.5 8Zm5 0c-.83 0-1.5-.67-1.5-1.5S13.67 5 14.5 5 16 5.67 16 6.5 15.33 8 14.5 8Zm3 4c-.83 0-1.5-.67-1.5-1.5S16.67 9 17.5 9s1.5.67 1.5 1.5-.67 1.5-1.5 1.5Z",
+    user: "M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4Zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4Z",
+    users: "M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5s-3 1.34-3 3 1.34 3 3 3Zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5 5 6.34 5 8s1.34 3 3 3Zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5C15 14.17 10.33 13 8 13Zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5Z",
+    org: "M10 3h4v4h-4V3ZM4 17h4v4H4v-4Zm12 0h4v4h-4v-4ZM6 15v-3h5V9h2v3h5v3h-2v-1H8v1H6Z",
+    support: "M12 2a10 10 0 0 0-10 10v7c0 1.1.9 2 2 2h4v-8H4v-1a8 8 0 0 1 16 0v1h-4v8h4c1.1 0 2-.9 2-2v-7A10 10 0 0 0 12 2Zm-2 13h4v2h-4v-2Zm0-7h4v6h-4V8Z",
+    channel: "M3 11v2h4l10 6V5L7 11H3Zm16.5 1c0-1.77-1-3.29-2.5-4.03v8.05c1.5-.73 2.5-2.25 2.5-4.02Z",
+
+    pin: "M16 9V4l1-1V2H7v1l1 1v5l-2 2v1h5v8l1 1 1-1v-8h5v-1l-2-2Z",
+    sync: "M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.96-.7 2.8l1.46 1.46A7.93 7.93 0 0 0 20 12c0-4.42-3.58-8-8-8Zm-6 8c0-1.01.25-1.96.7-2.8L5.24 7.74A7.93 7.93 0 0 0 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3c-3.31 0-6-2.69-6-6Z",
+    building: "M3 21V3h10v4h8v14h-2v-2H5v2H3Zm4-4h2v-2H7v2Zm0-4h2v-2H7v2Zm0-4h2V7H7v2Zm4 8h2v-2h-2v2Zm0-4h2v-2h-2v2Zm0-4h2V7h-2v2Zm4 8h2v-2h-2v2Zm0-4h2v-2h-2v2Zm0-4h2V7h-2v2Z",
+    database: "M12 3C7.58 3 4 4.34 4 6v12c0 1.66 3.58 3 8 3s8-1.34 8-3V6c0-1.66-3.58-3-8-3Zm0 2c3.31 0 6 .67 6 1s-2.69 1-6 1-6-.67-6-1 2.69-1 6-1Zm0 14c-3.31 0-6-.67-6-1v-2.03C7.45 16.6 9.6 17 12 17s4.55-.4 6-1.03V18c0 .33-2.69 1-6 1Zm0-4c-3.31 0-6-.67-6-1v-2.03C7.45 12.6 9.6 13 12 13s4.55-.4 6-1.03V14c0 .33-2.69 1-6 1Zm0-4c-3.31 0-6-.67-6-1V7.97C7.45 8.6 9.6 9 12 9s4.55-.4 6-1.03V10c0 .33-2.69 1-6 1Z",
+    bolt: "M7 2v11h3v9l7-12h-4l4-8H7Z",
+    lock: "M17 8h-1V6c0-2.76-2.24-5-5-5S6 3.24 6 6v2H5c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2Zm-3 0H8V6c0-1.66 1.34-3 3-3s3 1.34 3 3v2Z",
+    upload: "M5 20h14v-2H5v2ZM19 9h-4V3H9v6H5l7 7 7-7Z",
+    image: "M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2ZM8.5 11.5l2.5 3.01L14.5 10l4.5 6H5l3.5-4.5Z",
+    write: "M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25ZM19 3.5 20.5 5 19 6.5 17.5 5 19 3.5Z",
+    forward: "M12 8V4l8 8-8 8v-4H4V8h8Z",
+    trash: "M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12ZM8 9h8v10H8V9Zm7.5-5-1-1h-5l-1 1H5v2h14V4h-3.5Z",
+    thumb: "M1 21h4V9H1v12Zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2Z",
+    download: "M5 20h14v-2H5v2ZM19 9h-4V3H9v6H5l7 7 7-7Z",
+    tag: "M20.59 13.41 11.17 4H4v7.17l9.41 9.42c.78.78 2.05.78 2.83 0l4.35-4.35c.78-.78.78-2.05 0-2.83ZM6.5 8C5.67 8 5 7.33 5 6.5S5.67 5 6.5 5 8 5.67 8 6.5 7.33 8 6.5 8Z",
+    search: "M9.5 3a6.5 6.5 0 0 1 5.17 10.44l4.44 4.44-1.41 1.41-4.44-4.44A6.5 6.5 0 1 1 9.5 3Zm0 2a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9Z",
+    health: "M19.43 12.98c.04-.32.07-.65.07-.98s-.02-.66-.07-.98l2.11-1.65-2-3.46-2.49 1a7.3 7.3 0 0 0-1.69-.98L14.5 2h-4l-.38 2.65c-.61.23-1.18.55-1.69.98l-2.49-1-2 3.46 2.11 1.65c-.04.32-.08.65-.08.98s.03.66.08.98l-2.11 1.65 2 3.46 2.49-1c.51.4 1.08.73 1.69.98L10.5 22h4l.38-2.65c.61-.25 1.18-.58 1.69-.98l2.49 1 2-3.46-2.11-1.65ZM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5Z",
+    info: "M11 17h2v-6h-2v6Zm1-14a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 16a7 7 0 1 1 0-14 7 7 0 0 1 0 14Zm-1-10h2V7h-2v2Z",
+    settings: "M19.43 12.98c.04-.32.07-.65.07-.98s-.02-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.37-.31-.6-.22l-2.49 1a7.3 7.3 0 0 0-1.69-.98L14.5 2.42C14.47 2.18 14.25 2 14 2h-4c-.25 0-.46.18-.5.42L9.12 5.07c-.61.23-1.18.55-1.69.98l-2.49-1c-.23-.08-.48 0-.6.22l-2 3.46c-.13.22-.07.49.12.64l2.11 1.65c-.04.32-.08.65-.08.98s.03.66.08.98l-2.11 1.65c-.19.15-.24.42-.12.64l2 3.46c.12.22.37.31.6.22l2.49-1c.51.4 1.08.73 1.69.98l.38 2.65c.04.24.25.42.5.42h4c.25 0 .47-.18.5-.42l.38-2.65c.61-.25 1.18-.58 1.69-.98l2.49 1c.23.08.48 0 .6-.22l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.65ZM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5Z",
+    shield: "M12 1 3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4Zm-1 15-4-4 1.4-1.4 2.6 2.59 5.6-5.59L18 9l-7 7Z",
+    logout: "M10.09 15.59 11.5 17l5-5-5-5-1.41 1.41L12.67 11H3v2h9.67l-2.58 2.59ZM19 3H5c-1.1 0-2 .9-2 2v4h2V5h14v14H5v-4H3v4c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2Z",
+    attach: "M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-1.38 1.12-2.5 2.5-2.5S13.5 3.62 13.5 5v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5c0 1.38 1.12 2.5 2.5 2.5s2.5-1.12 2.5-2.5V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5Z",
+    smile: "M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2ZM8.5 8.5c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5S7 10.83 7 10s.67-1.5 1.5-1.5Zm3.5 9c-2.33 0-4.31-1.46-5.11-3.5h10.22c-.8 2.04-2.78 3.5-5.11 3.5Zm3.5-6c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5S17 9.17 17 10s-.67 1.5-1.5 1.5Z"
+  };
+  function icon(name, cls = "") {
+    const path = ICON_PATHS[name] || ICON_PATHS.chat;
+    return `<svg class="mui-icon mui-icon-${name} ${cls}" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="${path}"></path></svg>`;
+  }
+  function iconLabel(name, text) { return `${icon(name)}<span>${text}</span>`; }
+
+
+  function fontStack(key) {
+    const stacks = {
+      segoe: '"Segoe UI", "Segoe UI Variable", system-ui, -apple-system, BlinkMacSystemFont, Roboto, Arial, sans-serif',
+      system: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif',
+      inter: 'Inter, "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, Roboto, Arial, sans-serif',
+      roboto: 'Roboto, "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, Arial, sans-serif',
+    };
+    return stacks[key] || stacks.segoe;
+  }
+
+
+  const ChatPrefs = {
+    favKey: "cc_favorite_chats",
+    archKey: "cc_archived_chats",
+    getSet(k) { try { return new Set(JSON.parse(localStorage.getItem(k) || "[]")); } catch (e) { return new Set(); } },
+    saveSet(k, set) { try { localStorage.setItem(k, JSON.stringify(Array.from(set))); } catch (e) {} },
+    favorites() { return this.getSet(this.favKey); },
+    archived() { return this.getSet(this.archKey); },
+    isFavorite(id) { return this.favorites().has(String(id)); },
+    isArchived(id) { return this.archived().has(String(id)); },
+    toggleFavorite(id) { const s = this.favorites(); const k = String(id); s.has(k) ? s.delete(k) : s.add(k); this.saveSet(this.favKey, s); },
+    toggleArchive(id) { const s = this.archived(); const k = String(id); s.has(k) ? s.delete(k) : s.add(k); this.saveSet(this.archKey, s); },
+  };
+
+  function filteredChats(chats) {
+    const f = State.chatFilter || "all";
+    return (chats || []).filter((c) => {
+      const archived = ChatPrefs.isArchived(c.id);
+      if (f === "archive") return archived;
+      if (archived) return false;
+      if (f === "private") return c.type === "private";
+      if (f === "groups") return c.type === "group";
+      if (f === "channels") return c.type === "channel";
+      if (f === "unread") return (c.unread || 0) > 0;
+      if (f === "favorites") return ChatPrefs.isFavorite(c.id);
+      return true;
+    });
+  }
+
+  function renderChatFilters() {
+    const bar = document.getElementById("chat-filters");
+    if (!bar) return;
+    const counts = {
+      all: State.chats.filter((c) => !ChatPrefs.isArchived(c.id)).length,
+      private: State.chats.filter((c) => !ChatPrefs.isArchived(c.id) && c.type === "private").length,
+      groups: State.chats.filter((c) => !ChatPrefs.isArchived(c.id) && c.type === "group").length,
+      channels: State.chats.filter((c) => !ChatPrefs.isArchived(c.id) && c.type === "channel").length,
+      unread: State.chats.filter((c) => !ChatPrefs.isArchived(c.id) && (c.unread || 0) > 0).length,
+      favorites: State.chats.filter((c) => !ChatPrefs.isArchived(c.id) && ChatPrefs.isFavorite(c.id)).length,
+      archive: State.chats.filter((c) => ChatPrefs.isArchived(c.id)).length,
+    };
+    const items = [
+      ["all", "Все"], ["private", "Личные"], ["groups", "Группы"], ["channels", "Каналы"],
+      ["unread", "Непрочитанные"], ["favorites", "Избранное"], ["archive", "Архив"],
+    ];
+    bar.innerHTML = items.map(([id, label]) => `<button class="chat-filter ${State.chatFilter === id ? "active" : ""}" data-filter="${id}">${label}${counts[id] ? `<span>${counts[id]}</span>` : ""}</button>`).join("");
+  }
+
+  function initChatFilterScroller() {
+    const bar = document.getElementById("chat-filters");
+    if (!bar || bar._swipeBound) return;
+    bar._swipeBound = true;
+    let down = false, moved = false, startX = 0, startLeft = 0;
+    function activateFilter(btn) {
+      if (!btn) return;
+      const filter = btn.getAttribute("data-filter");
+      if (!filter || filter === State.chatFilter) return;
+      State.chatFilter = filter;
+      localStorage.setItem("cc_chat_filter", State.chatFilter);
+      renderChatList(State.chats);
+    }
+    bar.addEventListener("click", (e) => {
+      const btn = e.target && typeof e.target.closest === "function" ? e.target.closest("button[data-filter]") : null;
+      if (!btn || !bar.contains(btn)) return;
+      if (moved) { e.preventDefault(); e.stopPropagation(); moved = false; return; }
+      activateFilter(btn);
+    });
+    bar.addEventListener("wheel", (e) => {
+      if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+        bar.scrollLeft += e.deltaY;
+        e.preventDefault();
+      }
+    }, { passive: false });
+    bar.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      down = true; moved = false; startX = e.clientX; startLeft = bar.scrollLeft;
+      // Delay adding .dragging until movement threshold is crossed, otherwise
+      // Chromium browsers may suppress normal button clicks.
+    });
+    bar.addEventListener("pointermove", (e) => {
+      if (!down) return;
+      const dx = e.clientX - startX;
+      if (Math.abs(dx) > 5) {
+        moved = true;
+        bar.classList.add("dragging");
+        bar.scrollLeft = startLeft - dx;
+        e.preventDefault();
+      }
+    });
+    function stop() {
+      if (!down) return;
+      down = false; bar.classList.remove("dragging");
+      // keep moved=true until click fires, then the click handler clears it
+      setTimeout(() => { moved = false; }, 0);
+    }
+    bar.addEventListener("pointerup", stop);
+    bar.addEventListener("pointercancel", stop);
+    bar.addEventListener("mouseleave", stop);
+  }
+
 
   async function loadPermissions() {
     try {
@@ -68,11 +237,13 @@
       const input = document.getElementById("composer-input");
       const sendBtn = document.getElementById("send-btn");
       const attachBtn = document.getElementById("attach-btn");
-      const allowSend = can("can_send_messages");
-      const allowAttach = can("can_send_files") || can("can_send_images");
+      const groupAllowsSend = can("can_send_messages");
+      const channelAllowsSend = canWriteActiveChat();
+      const allowSend = groupAllowsSend && channelAllowsSend;
+      const allowAttach = allowSend && (can("can_send_files") || can("can_send_images"));
       if (input) {
         input.disabled = !allowSend;
-        input.placeholder = allowSend ? "Сообщение..." : "Ваша группа не может отправлять сообщения";
+        input.placeholder = allowSend ? "Сообщение..." : (groupAllowsSend ? "В канал могут писать только администраторы" : "Ваша группа не может отправлять сообщения");
       }
       if (sendBtn) sendBtn.style.display = allowSend ? "" : "none";
       if (attachBtn) attachBtn.style.display = allowAttach ? "" : "none";
@@ -87,17 +258,21 @@
     _cache: null,
     _defaults: {
       // Appearance
+      fontFamily: "segoe",   // segoe | system | inter | roboto
       fontSize: 15,
       compact: false,
       bubbleStyle: "rounded", // rounded | square
       showSidebar: true,      // right-side online users panel
+      chatBg: "default",     // default | telegram | blue | green | dark | customColor | customImage
+      chatBgCustomColor: "#dbeafe",
+      chatBgImage: "",       // data URL, local per device
       // Chat
       enterToSend: true,
       time24: true,           // 24h vs 12h time format
       spellcheck: true,       // textarea spellcheck
       // Notifications
       sound: true,
-      notify: false,
+      notify: true,
       notifyPreview: true,    // show message text in notifications
       // General / App (desktop)
       keepInTray: true,       // keep running after [X]
@@ -112,6 +287,16 @@
       if (this._cache) return this._cache;
       try { this._cache = Object.assign({}, this._defaults, JSON.parse(localStorage.getItem(this.KEY) || "{}")); }
       catch (e) { this._cache = Object.assign({}, this._defaults); }
+      // Restore message notifications for existing users. Earlier builds saved
+      // notify=false in localStorage, so changing defaults was not enough.
+      // Run once per browser/profile, then the user can still disable it in settings.
+      try {
+        if (localStorage.getItem("cc_restore_message_notify_v1") !== "1") {
+          this._cache.notify = true;
+          localStorage.setItem("cc_restore_message_notify_v1", "1");
+          localStorage.setItem(this.KEY, JSON.stringify(this._cache));
+        }
+      } catch (e) {}
       return this._cache;
     },
     get(k) { return this.all()[k]; },
@@ -125,12 +310,38 @@
 
   function applyPrefs() {
     const p = Prefs.all();
+    document.documentElement.style.setProperty("--app-font", fontStack(p.fontFamily));
     document.documentElement.style.setProperty("--msg-font-size", p.fontSize + "px");
     document.body.classList.toggle("compact-mode", !!p.compact);
     document.body.classList.toggle("bubbles-square", p.bubbleStyle === "square");
     document.body.classList.toggle("hide-right-sidebar", !p.showSidebar);
+    applyChatBackground(p);
     const ta = document.getElementById("composer-input");
     if (ta) ta.spellcheck = !!p.spellcheck;
+  }
+
+  function applyChatBackground(p) {
+    p = p || Prefs.all();
+    ["default", "telegram", "blue", "green", "dark", "customColor", "customImage"].forEach((k) =>
+      document.body.classList.remove("chat-bg-" + k));
+    const kind = p.chatBg || "default";
+    document.body.classList.add("chat-bg-" + kind);
+    document.documentElement.style.removeProperty("--chat-wallpaper");
+    document.documentElement.style.removeProperty("--chat-wallpaper-size");
+    if (kind === "customColor" && p.chatBgCustomColor) {
+      document.documentElement.style.setProperty("--chat-wallpaper", p.chatBgCustomColor);
+      document.documentElement.style.setProperty("--chat-wallpaper-size", "auto");
+    } else if (kind === "customImage" && p.chatBgImage) {
+      document.documentElement.style.setProperty("--chat-wallpaper", `url("${String(p.chatBgImage).replace(/"/g, '%22')}")`);
+      document.documentElement.style.setProperty("--chat-wallpaper-size", "cover");
+    }
+  }
+
+  function canWriteActiveChat() {
+    if (!can("can_send_messages")) return false;
+    if (!State.activeChat || State.activeChat.type !== "channel") return true;
+    const me = State.activeChat.members && State.activeChat.members.find((m) => m.id === State.me.id);
+    return State.me.role === "admin" || !!(me && me.is_chat_admin);
   }
 
   // ---------- Archive (localStorage-backed, like Telegram archive) ----------
@@ -257,8 +468,31 @@
         }
         break;
       }
+      case "call_invite": { onWebCallInvite(data); break; }
+      case "call_accept": { onWebCallAccept(data); break; }
+      case "call_reject": { onWebCallReject(data); break; }
+      case "call_end": { onWebCallEnd(data); break; }
+      case "call_signal": { onWebCallSignal(data); break; }
+      case "incoming_call": { showIncomingCall(data.call || {}); break; }
+      case "missed_call": {
+        if (typeof data.unread_count === "number") State.missedCallsUnread = data.unread_count;
+        else State.missedCallsUnread += 1;
+        updateCallsBadge(); updateUnreadIndicator();
+        showMissedCall(data.call || {});
+        break;
+      }
+      case "missed_calls_count": {
+        State.missedCallsUnread = Math.max(0, parseInt(data.count || 0, 10));
+        updateCallsBadge(); updateUnreadIndicator();
+        break;
+      }
+      case "support_updated": {
+        if (document.getElementById("support-modal")) openSupportModal(data.ticket_id || null);
+        else window.toast("Обновление в поддержке", "success");
+        break;
+      }
       case "broadcast": {
-        window.toast("📢 " + data.text, "success");
+        window.toast(data.text, "success");
         break;
       }
       case "force_logout": {
@@ -281,29 +515,45 @@
     State.me = API.Store.getUser();
     app().innerHTML = `
       <div class="app-layout" id="app-layout">
+        <aside class="app-rail" id="app-rail" aria-label="Быстрые действия">
+          <button class="rail-btn menu-btn" id="menu-btn" title="Меню">${icon("menu")}</button>
+          <div class="rail-sep"></div>
+          <button class="rail-btn" id="contacts-btn" title="Контактная книга">${icon("contacts")}</button>
+          <button class="rail-btn" id="calls-btn" title="Вызовы">${icon("phone")}<span class="call-unread-badge" id="calls-unread-badge" style="display:none"></span></button>
+          <button class="rail-btn" id="calendar-btn" title="Календарь">${icon("calendar")}</button>
+          <button class="rail-btn" id="new-chat-btn" title="Новый чат">${icon("edit")}</button>
+          <div class="rail-spacer"></div>
+          <button class="rail-btn" id="rail-theme-btn" title="Сменить тему">${icon("theme")}</button>
+        </aside>
         <aside class="sidebar">
           <div class="sidebar-header">
-            <button class="menu-btn" id="menu-btn" title="Меню">☰</button>
             <div class="search-box"><input type="text" id="search-input" placeholder="Поиск" /></div>
-            <button class="icon-btn" id="contacts-btn" title="Контактная книга">📇</button>
-            <button class="icon-btn" id="new-chat-btn" title="Новый чат">✏️</button>
           </div>
+          <div class="chat-filters" id="chat-filters"></div>
           <div class="chat-list" id="chat-list"></div>
         </aside>
         <main class="chat-area" id="chat-area">
           <div class="chat-area-empty" id="chat-empty">
-            <div class="big-icon">💬</div>
+            <div class="big-icon">${icon("chat")}</div>
             <div class="empty-pill">Выберите чат, чтобы начать общение</div>
           </div>
         </main>
         <aside class="right-sidebar" id="right-sidebar">
           <div class="rs-header">
-            <div class="rs-title">👥 Пользователи <span class="rs-count" id="rs-count"></span></div>
+            <div class="rs-title">${icon("users")} Пользователи <span class="rs-count" id="rs-count"></span></div>
             <input type="text" class="rs-search" id="rs-search" placeholder="Поиск по всем пользователям" />
           </div>
           <div class="rs-list" id="rs-list"></div>
         </aside>
       </div>
+      <nav class="mobile-bottom-nav" id="mobile-bottom-nav">
+        <button data-mnav="chats" class="active">${iconLabel("chat", "Чаты")}</button>
+        <button data-mnav="today">${iconLabel("home", "Сегодня")}</button>
+        <button data-mnav="calls">${iconLabel("phone", "Вызовы")}</button>
+        <button data-mnav="calendar">${iconLabel("calendar", "Календарь")}</button>
+        <button data-mnav="support">${iconLabel("support", "Помощь")}</button>
+      </nav>
+      ${localStorage.getItem("cc_admin_token") ? '<div class="impersonation-banner" id="impersonation-banner"><span>${icon("user")} Режим входа под пользователем</span><button class="btn-secondary" id="imp-return-admin">Вернуться в админа</button></div>' : ""}
       <div class="drawer-overlay" id="drawer-overlay"></div>
       <nav class="drawer" id="drawer">
         <div class="drawer-header">
@@ -323,19 +573,24 @@
       dav.innerHTML = `<img class="avatar-img" src="${escapeAttr(me.avatar_url)}" alt="" />`;
     } else {
       dav.style.background = me.avatar_color;
-      dav.textContent = initials(me.full_name || me.username);
+      const label = initials(me.full_name || me.username);
+      dav.innerHTML = label === "?" ? icon("user", "avatar-material-icon") : escapeHtml(label);
     }
     document.getElementById("drawer-name").textContent = me.full_name || me.username;
     document.getElementById("drawer-email").textContent = me.email;
 
     let items = `
-      <div class="drawer-item" data-action="profile"><span class="di-icon">👤</span> Мой профиль</div>
-      <div class="drawer-item" data-action="contacts"><span class="di-icon">📇</span> Контактная книга</div>
-      <div class="drawer-item" data-action="newgroup"><span class="di-icon">👥</span> Новая группа</div>
-      <div class="drawer-item" data-action="settings"><span class="di-icon">⚙️</span> Настройки</div>
-      <div class="drawer-item" data-action="theme"><span class="di-icon">🌓</span> Сменить тему</div>`;
-    if (me.role === "admin") items += `<div class="drawer-item" data-action="admin"><span class="di-icon">🛡️</span> Админ-панель</div>`;
-    items += `<div class="drawer-item" data-action="logout"><span class="di-icon">🚪</span> Выйти</div>`;
+      <div class="drawer-item" data-action="profile"><span class="di-icon">${icon("user")}</span> Мой профиль</div>
+      <div class="drawer-item" data-action="today"><span class="di-icon">${icon("home")}</span> Сегодня</div>
+      <div class="drawer-item" data-action="contacts"><span class="di-icon">${icon("contacts")}</span> Контактная книга</div>
+      <div class="drawer-item" data-action="org"><span class="di-icon">${icon("org")}</span> Оргструктура</div>
+      <div class="drawer-item" data-action="support"><span class="di-icon">${icon("support")}</span> Поддержка</div>
+      <div class="drawer-item" data-action="newgroup"><span class="di-icon">${icon("users")}</span> Новая группа</div>
+      <div class="drawer-item" data-action="newchannel"><span class="di-icon">${icon("channel")}</span> Новый канал</div>
+      <div class="drawer-item" data-action="settings"><span class="di-icon">${icon("settings")}</span> Настройки</div>`;
+    if (localStorage.getItem("cc_admin_token")) items += `<div class="drawer-item" data-action="returnadmin"><span class="di-icon">${icon("shield")}</span> Вернуться в админа</div>`;
+    if (me.role === "admin") items += `<div class="drawer-item" data-action="admin"><span class="di-icon">${icon("shield")}</span> Админ-панель</div>`;
+    items += `<div class="drawer-item" data-action="logout"><span class="di-icon">${icon("logout")}</span> Выйти</div>`;
     const menu = document.getElementById("drawer-menu");
     menu.innerHTML = items;
     menu.addEventListener("click", (e) => {
@@ -344,10 +599,33 @@
       handleDrawerAction(item.getAttribute("data-action"));
     });
 
-    document.getElementById("menu-btn").addEventListener("click", openDrawer);
+    const menuBtn = document.getElementById("menu-btn");
+    if (menuBtn) menuBtn.addEventListener("click", openDrawer);
+    const railThemeBtn = document.getElementById("rail-theme-btn");
+    if (railThemeBtn) railThemeBtn.addEventListener("click", toggleTheme);
     document.getElementById("drawer-overlay").addEventListener("click", closeDrawer);
     document.getElementById("contacts-btn").addEventListener("click", openContactsModal);
+    const callsBtn = document.getElementById("calls-btn");
+    if (callsBtn) callsBtn.addEventListener("click", openCallsModal);
+    const calendarBtn = document.getElementById("calendar-btn");
+    if (calendarBtn) calendarBtn.addEventListener("click", openCalendarModal);
+    const mbn = document.getElementById("mobile-bottom-nav");
+    if (mbn) mbn.addEventListener("click", (e) => {
+      const b = e.target && typeof e.target.closest === "function" ? e.target.closest("button[data-mnav]") : null;
+      if (!b) return;
+      mbn.querySelectorAll("button").forEach((x) => x.classList.remove("active"));
+      b.classList.add("active");
+      const a = b.getAttribute("data-mnav");
+      if (a === "today") openTodayModal();
+      else if (a === "calls") openCallsModal();
+      else if (a === "calendar") openCalendarModal();
+      else if (a === "support") openSupportModal();
+      else if (a === "chats") { document.getElementById("app-layout").classList.remove("has-active-chat"); Router.navigate("/chats"); }
+    });
+    initChatFilterScroller();
     document.getElementById("new-chat-btn").addEventListener("click", () => openNewChatModal(false));
+    const impReturn = document.getElementById("imp-return-admin");
+    if (impReturn) impReturn.addEventListener("click", returnToAdmin);
 
     const search = document.getElementById("search-input");
     let st = null;
@@ -369,7 +647,7 @@
     const countEl = document.getElementById("rs-count");
     if (!list) return;
     let users = [];
-    try { users = await API.searchUsers(q || ""); } catch (e) { return; }
+    try { users = await API.searchUsers(q || "", 1000); } catch (e) { return; }
     State.allUsers = users;
     const online = users.filter((u) => u.is_online);
     const offline = users.filter((u) => !u.is_online);
@@ -411,9 +689,48 @@
             ${contact}
           </div>
         </div>
-        <button class="rs-info-btn" data-info="${u.id}" title="Профиль">ⓘ</button>
+        <button class="rs-info-btn" data-info="${u.id}" title="Профиль">${icon("info")}</button>
       </div>
     </div>`;
+  }
+
+
+  // ---------- Today dashboard ----------
+  async function openTodayModal() {
+    const overlay = document.getElementById("modal-overlay");
+    overlay.innerHTML = `
+      <div class="modal modal-lg today-modal mobile-sheet">
+        <div class="modal-header"><h2>${icon("home")} Сегодня</h2><button class="modal-close">✕</button></div>
+        <div class="modal-body" id="today-body"><div class="list-empty">Собираю сводку…</div></div>
+      </div>`;
+    overlay.classList.add("show");
+    function close() { overlay.classList.remove("show"); overlay.innerHTML = ""; }
+    overlay.querySelector(".modal-close").addEventListener("click", close);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    const body = document.getElementById("today-body");
+
+    const start = new Date(); start.setHours(0,0,0,0);
+    const end = new Date(); end.setHours(23,59,59,999);
+    let chats = [], missed = { count: 0 }, notes = [], tickets = [];
+    try { chats = await API.listChats(); } catch (e) {}
+    try { missed = await API.missedCallsUnreadCount(); } catch (e) {}
+    try { notes = await API.calendarNotes(start.toISOString(), end.toISOString()); } catch (e) {}
+    try { tickets = await API.supportTickets(); } catch (e) {}
+
+    const unreadChats = (chats || []).filter((c) => (c.unread || 0) > 0).slice(0, 8);
+    const channelChats = (chats || []).filter((c) => c.type === "channel" && c.last_message_at).slice(0, 5);
+    const openTickets = (tickets || []).filter((t) => t.status !== "closed").slice(0, 6);
+    body.innerHTML = `
+      <div class="today-grid">
+        <section class="today-card"><h3>${icon("chat")} Непрочитанные</h3>${unreadChats.length ? unreadChats.map((c) => `<button class="today-row" data-chat="${c.id}"><b>${escapeHtml(c.name)}</b><span>${c.unread} новых · ${escapeHtml(c.last_message || "")}</span></button>`).join("") : '<div class="today-empty">Нет непрочитанных</div>'}</section>
+        <section class="today-card"><h3>${icon("phone")} Вызовы</h3><button class="today-big" id="today-calls"><b>${missed.count || 0}</b><span>пропущенных</span></button></section>
+        <section class="today-card"><h3>${icon("calendar")} Календарь</h3>${notes.length ? notes.slice(0, 8).map((n) => `<div class="today-row"><b>${new Date(n.starts_at).toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit"})} · ${escapeHtml(n.title)}</b><span>${escapeHtml(n.calendar_name || "")}</span></div>`).join("") : '<div class="today-empty">На сегодня заметок нет</div>'}</section>
+        <section class="today-card"><h3>${icon("support")} Поддержка</h3>${openTickets.length ? openTickets.map((t) => `<button class="today-row" data-support="${t.id}"><b>#${t.id} ${escapeHtml(t.subject)}</b><span>${escapeHtml(t.status)}${t.unread ? " · новых " + t.unread : ""}</span></button>`).join("") : '<div class="today-empty">Активных обращений нет</div>'}</section>
+        <section class="today-card"><h3>${icon("channel")} Каналы</h3>${channelChats.length ? channelChats.map((c) => `<button class="today-row" data-chat="${c.id}"><b>${escapeHtml(c.name)}</b><span>${escapeHtml(c.last_message || "")}</span></button>`).join("") : '<div class="today-empty">Нет свежих объявлений</div>'}</section>
+      </div>`;
+    body.querySelectorAll("[data-chat]").forEach((b) => b.addEventListener("click", () => { close(); Router.navigate("/chats/" + b.getAttribute("data-chat")); }));
+    body.querySelectorAll("[data-support]").forEach((b) => b.addEventListener("click", () => openSupportModal(parseInt(b.getAttribute("data-support"), 10))));
+    const calls = document.getElementById("today-calls"); if (calls) calls.addEventListener("click", () => openCallsModal());
   }
 
   function handleDrawerAction(a) {
@@ -421,11 +738,761 @@
     if (a === "logout") return logout();
     if (a === "theme") return toggleTheme();
     if (a === "admin") return Router.navigate("/admin");
+    if (a === "returnadmin") return returnToAdmin();
     if (a === "settings") return openSettingsModal();
     if (a === "profile") return openProfileModal();
+    if (a === "today") return openTodayModal();
     if (a === "contacts") return openContactsModal();
+    if (a === "org") return openOrgModal();
+    if (a === "support") return openSupportModal();
     if (a === "newgroup") return openNewChatModal(true);
+    if (a === "newchannel") return openNewChatModal(false, true);
   }
+
+
+
+  async function openOrgModal() {
+    const overlay = document.getElementById("modal-overlay");
+    overlay.innerHTML = `
+      <div class="modal modal-lg org-modal">
+        <div class="modal-header"><h2>${icon("building")} Организационная структура</h2><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="field"><input type="text" id="org-search" placeholder="Поиск отдела, ФИО, должности, телефона…" /></div>
+          <div class="settings-sub" id="org-hint" style="margin-bottom:10px">Отделы строятся по группам приложения, которые можно импортировать и синхронизировать из AD.</div>
+          <div id="org-tree"><div class="list-empty">Загрузка…</div></div>
+        </div>
+      </div>`;
+    overlay.classList.add("show");
+    function close() { overlay.classList.remove("show"); overlay.innerHTML = ""; }
+    overlay.querySelector(".modal-close").addEventListener("click", close);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+
+    let data = { departments: [] };
+    try { data = await API.orgTree(); } catch (e) { document.getElementById("org-tree").innerHTML = `<div class="list-empty">${escapeHtml(e.message)}</div>`; return; }
+    const search = document.getElementById("org-search");
+    function render() {
+      const q = (search.value || "").trim().toLowerCase();
+      const deps = (data.departments || []).map((d) => {
+        const members = (d.members || []).filter((u) => {
+          if (!q) return true;
+          const hay = [d.name, u.full_name, u.username, u.email, u.title, u.phone, u.office].join(" ").toLowerCase();
+          return hay.includes(q);
+        });
+        const depMatch = q && (d.name || "").toLowerCase().includes(q);
+        return Object.assign({}, d, { members: depMatch ? (d.members || []) : members, _visible: depMatch || members.length || !q });
+      }).filter((d) => d._visible);
+      const total = deps.reduce((n, d) => n + (d.members || []).length, 0);
+      const tree = document.getElementById("org-tree");
+      if (!deps.length) { tree.innerHTML = `<div class="list-empty">Ничего не найдено</div>`; return; }
+      tree.innerHTML = `<div class="org-total">Отделов: ${deps.length} · сотрудников: ${total}</div>` + deps.map((d, idx) => `
+        <details class="org-dept" data-dept-id="${d.id == null ? 'none' : d.id}" ${idx < 4 || q ? "open" : ""}>
+          <summary>
+            <span class="org-dept-name">${escapeHtml(d.name)} ${d.ad_group_dn ? '<span class="badge ad">AD</span>' : ""}</span>
+            <span class="org-dept-count" data-total="${d.member_count}">${d.member_count} · онлайн <b>${d.online_count}</b></span>
+          </summary>
+          <div class="org-members">
+            ${(d.members || []).map((u) => `
+              <div class="org-member" data-uid="${u.id}" data-online="${u.is_online ? 1 : 0}">
+                ${avatarHtml({ url: u.avatar_url, color: u.avatar_color, name: u.full_name || u.username, size: "sm", extra: u.is_online ? '<span class="online-dot"></span>' : "" })}
+                <div class="org-member-info">
+                  <div class="org-member-name">${escapeHtml(u.full_name || u.username)} ${u.auth_source === "ldap" ? '<span class="badge ad">AD</span>' : ""}</div>
+                  <div class="org-member-meta">${u.title ? escapeHtml(u.title) + " · " : ""}@${escapeHtml(u.username)}${u.office ? " · " + escapeHtml(u.office) : ""}</div>
+                  <div class="org-member-contact">${u.email ? escapeHtml(u.email) : ""}${u.phone ? " · " + escapeHtml(u.phone) : ""}</div>
+                </div>
+                <button class="mini-btn" data-msg="${u.id}">${icon("chat")}</button>
+                <button class="mini-btn" data-info="${u.id}">${icon("info")}</button>
+              </div>`).join("") || '<div class="settings-sub" style="padding:8px">Нет сотрудников</div>'}
+          </div>
+        </details>`).join("");
+      tree.querySelectorAll("button[data-msg]").forEach((b) => b.addEventListener("click", () => { close(); startPrivateChat(parseInt(b.getAttribute("data-msg"), 10)); }));
+      tree.querySelectorAll("button[data-info]").forEach((b) => b.addEventListener("click", () => { close(); openUserCard(parseInt(b.getAttribute("data-info"), 10)); }));
+    }
+    let t = null;
+    search.addEventListener("input", () => { clearTimeout(t); t = setTimeout(render, 120); });
+    render();
+  }
+
+
+
+
+
+
+  async function startOneToOneCall(userId) {
+    try {
+      const r = await API.originateCall(userId);
+      if (r && r.ok) window.toast("Звонок инициирован", "success");
+      else window.toast((r && r.error) || "Не удалось инициировать звонок", "error");
+    } catch (e) { window.toast(e.message, "error"); }
+  }
+
+  // ---------- Calendar notes ----------
+  async function openCalendarModal() {
+    const overlay = document.getElementById("modal-overlay");
+    const today = new Date();
+    let view = new Date(today.getFullYear(), today.getMonth(), 1);
+    let selected = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    let notes = [];
+    let calendars = [];
+    let selectedCalendarId = "all";
+
+    overlay.innerHTML = `
+      <div class="modal modal-lg calendar-modal mobile-sheet">
+        <div class="modal-header calendar-head">
+          <h2>${icon("calendar")} Календарь</h2>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body calendar-body">
+          <div class="calendar-toolbar">
+            <button class="btn-secondary cal-nav" id="cal-prev" title="Предыдущий месяц">‹</button>
+            <div id="cal-title"></div>
+            <button class="btn-secondary cal-nav" id="cal-next" title="Следующий месяц">›</button>
+          </div>
+          <div class="calendar-bar">
+            <div class="calendar-chips" id="calendar-chips"></div>
+            <button class="btn-secondary" id="cal-manage">Календари</button>
+          </div>
+          <div class="calendar-layout">
+            <section class="calendar-month-card"><div class="calendar-grid" id="calendar-grid"></div></section>
+            <section class="calendar-day-panel">
+              <div class="cal-day-head">
+                <div><h3 id="cal-day-title"></h3><div class="settings-sub" id="cal-day-sub"></div></div>
+                <button class="btn-primary inline" id="cal-add">＋ Заметка</button>
+              </div>
+              <div id="cal-notes"></div>
+            </section>
+          </div>
+        </div>
+      </div>`;
+    overlay.classList.add("show");
+
+    function close() { overlay.classList.remove("show"); overlay.innerHTML = ""; }
+    overlay.querySelector(".modal-close").addEventListener("click", close);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    document.getElementById("cal-prev").addEventListener("click", () => { view = new Date(view.getFullYear(), view.getMonth() - 1, 1); loadNotes(); });
+    document.getElementById("cal-next").addEventListener("click", () => { view = new Date(view.getFullYear(), view.getMonth() + 1, 1); loadNotes(); });
+    document.getElementById("cal-add").addEventListener("click", () => openNoteSheet(null));
+    document.getElementById("cal-manage").addEventListener("click", openCalendarManager);
+
+    function toLocalInputValue(d) {
+      const yyyy = d.getFullYear(), mm = String(d.getMonth()+1).padStart(2,"0"), dd = String(d.getDate()).padStart(2,"0"), hh = String(d.getHours()).padStart(2,"0"), mi = String(d.getMinutes()).padStart(2,"0");
+      return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
+    }
+    function defaultDateTime() { return toLocalInputValue(new Date(selected.getFullYear(), selected.getMonth(), selected.getDate(), 9, 0, 0)); }
+    function sameDay(a,b) { return a.getFullYear()===b.getFullYear() && a.getMonth()===b.getMonth() && a.getDate()===b.getDate(); }
+    function noteDate(n) { return new Date(n.starts_at); }
+    function currentCalendar() { return calendars.find((c) => String(c.id) === String(selectedCalendarId)) || calendars[0]; }
+    function visibleNotes() { return selectedCalendarId === "all" ? notes : notes.filter((n) => String(n.calendar_id) === String(selectedCalendarId)); }
+
+    async function loadCalendars() {
+      try { calendars = await API.calendars(); }
+      catch (e) { calendars = []; window.toast(e.message, "error"); }
+      if (!calendars.length) selectedCalendarId = "all";
+      renderCalendarChips();
+    }
+
+    async function loadNotes() {
+      const start = new Date(view.getFullYear(), view.getMonth(), 1);
+      const end = new Date(view.getFullYear(), view.getMonth()+1, 0, 23, 59, 59);
+      try { notes = await API.calendarNotes(start.toISOString(), end.toISOString(), selectedCalendarId === "all" ? null : selectedCalendarId); }
+      catch (e) { notes = []; window.toast(e.message, "error"); }
+      render();
+    }
+
+    function renderCalendarChips() {
+      const box = document.getElementById("calendar-chips");
+      if (!box) return;
+      box.innerHTML = `<button class="calendar-chip ${selectedCalendarId === "all" ? "active" : ""}" data-cal="all"><i style="background:#707579"></i>Все</button>` + calendars.map((c) =>
+        `<button class="calendar-chip ${String(selectedCalendarId) === String(c.id) ? "active" : ""}" data-cal="${c.id}"><i style="background:${escapeAttr(c.color)}"></i>${escapeHtml(c.name)}${c.is_shared ? " " + icon("users") : ""}</button>`
+      ).join("");
+      box.querySelectorAll("[data-cal]").forEach((b) => b.addEventListener("click", () => { selectedCalendarId = b.getAttribute("data-cal"); renderCalendarChips(); loadNotes(); }));
+    }
+
+    function render() {
+      renderCalendarChips();
+      document.getElementById("cal-title").textContent = view.toLocaleDateString("ru-RU", { month:"long", year:"numeric" });
+      const grid = document.getElementById("calendar-grid");
+      const first = new Date(view.getFullYear(), view.getMonth(), 1);
+      const offset = (first.getDay()+6)%7;
+      const start = new Date(view.getFullYear(), view.getMonth(), 1-offset);
+      const week = ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"].map((w) => `<div class="cal-weekday">${w}</div>`).join("");
+      const vnotes = visibleNotes();
+      let cells = "";
+      for (let i=0;i<42;i++) {
+        const d = new Date(start.getFullYear(), start.getMonth(), start.getDate()+i);
+        const dn = vnotes.filter((n) => sameDay(noteDate(n), d));
+        cells += `<button class="cal-cell ${d.getMonth()!==view.getMonth()?"muted":""} ${sameDay(d,selected)?"active":""} ${sameDay(d,today)?"today":""}" data-date="${d.toISOString()}"><b>${d.getDate()}</b>${dn.length ? `<span>${dn.length}</span>` : ""}</button>`;
+      }
+      grid.innerHTML = week + cells;
+      grid.querySelectorAll(".cal-cell").forEach((b) => b.addEventListener("click", () => { selected = new Date(b.getAttribute("data-date")); if (selected.getMonth() !== view.getMonth()) view = new Date(selected.getFullYear(), selected.getMonth(), 1); render(); }));
+      renderDay();
+    }
+
+    function renderDay() {
+      const dayNotes = visibleNotes().filter((n) => sameDay(noteDate(n), selected)).sort((a,b) => new Date(a.starts_at)-new Date(b.starts_at));
+      document.getElementById("cal-day-title").textContent = selected.toLocaleDateString("ru-RU", { day:"numeric", month:"long", weekday:"long" });
+      document.getElementById("cal-day-sub").textContent = dayNotes.length ? `Заметок: ${dayNotes.length}` : "Свободный день";
+      const box = document.getElementById("cal-notes");
+      if (!dayNotes.length) { box.innerHTML = `<div class="calendar-empty"><div>${icon("calendar")}</div><b>Нет заметок</b><span>Нажмите «＋ Заметка», чтобы добавить событие.</span></div>`; return; }
+      box.innerHTML = dayNotes.map((n) => `
+        <article class="cal-note ${n.is_done ? "done" : ""}" style="border-left-color:${escapeAttr(n.calendar_color || n.color)}" data-note-id="${n.id}">
+          <div class="cal-note-main"><div class="cal-note-time">${new Date(n.starts_at).toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit"})}</div><div class="cal-note-content"><b>${escapeHtml(n.title)}</b><em>${escapeHtml(n.calendar_name || "")}</em>${n.text ? `<p>${escapeHtml(n.text)}</p>` : ""}</div></div>
+          <div class="cal-note-actions"><button class="mini-btn" data-done="${n.id}">${n.is_done ? "Вернуть" : "Готово"}</button><button class="mini-btn" data-edit="${n.id}">Изм.</button><button class="mini-btn danger" data-del="${n.id}">Удалить</button></div>
+        </article>`).join("");
+      box.querySelectorAll("[data-edit]").forEach((b) => b.addEventListener("click", () => openNoteSheet(dayNotes.find((n) => String(n.id) === String(b.getAttribute("data-edit"))))));
+      box.querySelectorAll("[data-done]").forEach((b) => b.addEventListener("click", async () => { const n = dayNotes.find((x) => String(x.id) === String(b.getAttribute("data-done"))); if (!n) return; try { await API.updateCalendarNote(n.id, { is_done: !n.is_done }); await loadNotes(); } catch (e) { window.toast(e.message, "error"); } }));
+      box.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", async () => { if (!(await uiConfirm("Удалить заметку?"))) return; try { await API.deleteCalendarNote(b.getAttribute("data-del")); await loadNotes(); } catch (e) { window.toast(e.message, "error"); } }));
+    }
+
+    function calendarOptions(selectedId) {
+      return calendars.filter((c) => c.can_edit !== false).map((c) => `<option value="${c.id}" ${String(selectedId) === String(c.id) ? "selected" : ""}>${escapeHtml(c.name)}</option>`).join("");
+    }
+
+    function openNoteSheet(note) {
+      let sheet = document.getElementById("calendar-note-sheet");
+      if (!sheet) { sheet = document.createElement("div"); sheet.id = "calendar-note-sheet"; sheet.className = "note-sheet-overlay"; document.body.appendChild(sheet); }
+      const cal = note ? (calendars.find((c) => c.id === note.calendar_id) || currentCalendar()) : (currentCalendar() || calendars[0]);
+      const calId = cal && cal.id ? cal.id : (calendars[0] && calendars[0].id);
+      const startVal = note ? toLocalInputValue(new Date(note.starts_at)) : defaultDateTime();
+      sheet.innerHTML = `
+        <div class="note-sheet"><div class="note-sheet-handle"></div><div class="note-sheet-head"><h3>${note ? "Изменить заметку" : "Новая заметка"}</h3><button class="modal-close" id="note-close">✕</button></div>
+          <div class="note-form">
+            <label>Календарь<select id="note-calendar" class="set-select">${calendarOptions(calId)}</select></label>
+            <label>Название<input id="note-title" type="text" maxlength="160" value="${escapeAttr(note ? note.title : "")}" placeholder="Например: совещание" autofocus></label>
+            <label>Дата и время<input id="note-start" type="datetime-local" value="${escapeAttr(startVal)}"></label>
+            <label>Цвет<input id="note-color" type="color" value="${escapeAttr(note ? note.color : (cal ? cal.color : "#3390ec"))}"></label>
+            <label>Текст<textarea id="note-text" rows="4" maxlength="2000" placeholder="Описание, ссылка, детали…">${escapeHtml(note ? (note.text || "") : "")}</textarea></label>
+            <label class="note-check"><input id="note-done" type="checkbox" ${note && note.is_done ? "checked" : ""}> Выполнено</label>
+          </div>
+          <div class="note-sheet-actions">${note ? `<button class="btn-danger" id="note-delete">Удалить</button>` : ""}<button class="btn-secondary" id="note-cancel">Отмена</button><button class="btn-primary inline" id="note-save">Сохранить</button></div>
+        </div>`;
+      sheet.classList.add("show");
+      const closeSheet = () => { sheet.classList.remove("show"); sheet.innerHTML = ""; };
+      document.getElementById("note-close").addEventListener("click", closeSheet);
+      document.getElementById("note-cancel").addEventListener("click", closeSheet);
+      sheet.addEventListener("click", (e) => { if (e.target === sheet) closeSheet(); }, { once:true });
+      setTimeout(() => { const i = document.getElementById("note-title"); if (i) i.focus(); }, 80);
+      document.getElementById("note-save").addEventListener("click", async () => {
+        const title = document.getElementById("note-title").value.trim(); const startsAt = document.getElementById("note-start").value; const calendar_id = parseInt(document.getElementById("note-calendar").value, 10);
+        if (!title) { window.toast("Введите название", "error"); return; }
+        if (!startsAt) { window.toast("Выберите дату и время", "error"); return; }
+        const payload = { calendar_id, title, text: document.getElementById("note-text").value.trim(), starts_at: new Date(startsAt).toISOString(), color: document.getElementById("note-color").value || "#3390ec", is_done: document.getElementById("note-done").checked };
+        try { const saved = note ? await API.updateCalendarNote(note.id, payload) : await API.createCalendarNote(payload); selected = new Date(saved.starts_at); view = new Date(selected.getFullYear(), selected.getMonth(), 1); closeSheet(); await loadCalendars(); await loadNotes(); } catch (e) { window.toast(e.message, "error"); }
+      });
+      const del = document.getElementById("note-delete"); if (del) del.addEventListener("click", async () => { if (!(await uiConfirm("Удалить заметку?"))) return; try { await API.deleteCalendarNote(note.id); closeSheet(); await loadNotes(); } catch (e) { window.toast(e.message, "error"); } });
+    }
+
+    async function openCalendarManager() {
+      let sheet = document.getElementById("calendar-note-sheet");
+      if (!sheet) { sheet = document.createElement("div"); sheet.id = "calendar-note-sheet"; sheet.className = "note-sheet-overlay"; document.body.appendChild(sheet); }
+      function renderManager(editCal) {
+        const list = calendars.map((c) => `<div class="calendar-manager-row"><span><i style="background:${escapeAttr(c.color)}"></i>${escapeHtml(c.name)}${c.is_shared ? " " + icon("users") : ""}</span><div>${c.owner_id === State.me.id ? `<button class="mini-btn" data-edit-cal="${c.id}">Изм.</button>${c.is_shared ? "" : ""}${c.name !== "Мой календарь" ? `<button class="mini-btn danger" data-del-cal="${c.id}">Удалить</button>` : ""}` : '<span class="settings-sub">общий</span>'}</div></div>`).join("");
+        sheet.innerHTML = `<div class="note-sheet"><div class="note-sheet-handle"></div><div class="note-sheet-head"><h3>Календари</h3><button class="modal-close" id="note-close">✕</button></div><div class="calendar-manager-list">${list}</div><button class="btn-primary inline" id="cal-new">＋ Новый календарь</button></div>`;
+        sheet.classList.add("show");
+        document.getElementById("note-close").addEventListener("click", closeManager);
+        document.getElementById("cal-new").addEventListener("click", () => renderForm(null));
+        sheet.querySelectorAll("[data-edit-cal]").forEach((b) => b.addEventListener("click", () => renderForm(calendars.find((c) => String(c.id) === String(b.getAttribute("data-edit-cal"))))));
+        sheet.querySelectorAll("[data-del-cal]").forEach((b) => b.addEventListener("click", async () => { if (!(await uiConfirm("Удалить календарь и его заметки?"))) return; await API.deleteCalendar(b.getAttribute("data-del-cal")); await loadCalendars(); await loadNotes(); renderManager(); }));
+      }
+      function closeManager() { sheet.classList.remove("show"); sheet.innerHTML = ""; }
+      function renderForm(cal) {
+        sheet.innerHTML = `<div class="note-sheet"><div class="note-sheet-handle"></div><div class="note-sheet-head"><h3>${cal ? "Изменить календарь" : "Новый календарь"}</h3><button class="modal-close" id="note-close">✕</button></div><div class="note-form"><label>Название<input id="cal-name-input" value="${escapeAttr(cal ? cal.name : "")}" placeholder="Например: Отдел продаж"></label><label>Цвет<input id="cal-color-input" type="color" value="${escapeAttr(cal ? cal.color : "#3390ec")}"></label><label>Участники общего календаря<input id="cal-members-input" placeholder="ID пользователей через запятую" value="${cal ? (cal.member_ids || []).filter((id) => id !== State.me.id).join(",") : ""}"></label><div class="settings-sub">ID пользователей можно увидеть в админке или карточке профиля. Пусто = личный календарь.</div></div><div class="note-sheet-actions"><button class="btn-secondary" id="cal-back">Назад</button><button class="btn-primary inline" id="cal-save">Сохранить</button></div></div>`;
+        document.getElementById("note-close").addEventListener("click", closeManager);
+        document.getElementById("cal-back").addEventListener("click", () => renderManager());
+        document.getElementById("cal-save").addEventListener("click", async () => {
+          const name = document.getElementById("cal-name-input").value.trim(); if (!name) { window.toast("Введите название", "error"); return; }
+          const member_ids = document.getElementById("cal-members-input").value.split(",").map((x) => parseInt(x.trim(), 10)).filter(Boolean);
+          const payload = { name, color: document.getElementById("cal-color-input").value || "#3390ec", member_ids };
+          try { cal ? await API.updateCalendar(cal.id, payload) : await API.createCalendar(payload); await loadCalendars(); await loadNotes(); renderManager(); } catch (e) { window.toast(e.message, "error"); }
+        });
+      }
+      renderManager();
+    }
+
+    await loadCalendars();
+    await loadNotes();
+  }
+
+
+  // ---------- WebRTC 1:1 internet calls ----------
+  function privateCallTarget() {
+    if (!State.activeChat || State.activeChat.type !== "private") return null;
+    return (State.activeChat.members || []).find((m) => m.id !== State.me.id) || null;
+  }
+
+  function wsSend(payload) {
+    if (!State.ws || State.ws.readyState !== 1) { window.toast("Нет соединения с сервером", "error"); return false; }
+    State.ws.send(JSON.stringify(payload));
+    return true;
+  }
+
+  function callSend(type, extra) {
+    const payload = Object.assign({ type, chat_id: State.activeChatId }, extra || {});
+    if (!payload.to_user_id && State.webCall && State.webCall.peerId) payload.to_user_id = State.webCall.peerId;
+    return wsSend(payload);
+  }
+
+  function ensureCallPanel(kind, title, sub) {
+    let p = document.getElementById("web-call-panel");
+    if (!p) {
+      p = document.createElement("div");
+      p.id = "web-call-panel";
+      p.className = "web-call-panel";
+      document.body.appendChild(p);
+    }
+    p.innerHTML = `
+      <div class="wc-icon">${icon("phone")}</div>
+      <div class="wc-body"><div class="wc-title">${escapeHtml(title)}</div><div class="wc-sub">${escapeHtml(sub || "")}</div></div>
+      <div class="wc-actions" id="wc-actions"></div>`;
+    p.classList.add("show");
+    return p;
+  }
+
+  function setCallActions(html) {
+    const a = document.getElementById("wc-actions");
+    if (a) a.innerHTML = html || "";
+  }
+
+  function hideCallPanel() {
+    const p = document.getElementById("web-call-panel");
+    if (p) p.classList.remove("show");
+  }
+
+  async function localCallStream() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error("Браузер не поддерживает микрофон/WebRTC");
+    }
+    try {
+      return await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    } catch (e) {
+      const name = e && e.name;
+      // Chrome/Edge: NotFoundError == no microphone/input device.
+      // In that case keep the call alive in receive-only mode instead of
+      // failing with the confusing "Requested device not found" message.
+      if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+        window.toast("Микрофон не найден — звонок открыт в режиме прослушивания", "error");
+        return null;
+      }
+      if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+        throw new Error("Доступ к микрофону запрещён. Разрешите микрофон в настройках браузера.");
+      }
+      throw new Error((e && e.message) || "Не удалось открыть микрофон");
+    }
+  }
+
+  async function createPeer() {
+    const pc = new RTCPeerConnection({ iceServers: [] });
+    const remoteAudio = document.getElementById("web-call-audio") || document.createElement("audio");
+    remoteAudio.id = "web-call-audio";
+    remoteAudio.autoplay = true;
+    remoteAudio.playsInline = true;
+    if (!remoteAudio.parentNode) document.body.appendChild(remoteAudio);
+
+    pc.ontrack = (ev) => { remoteAudio.srcObject = ev.streams[0]; };
+    pc.onicecandidate = (ev) => {
+      if (ev.candidate) callSend("call_signal", { signal: { candidate: ev.candidate } });
+    };
+    pc.onconnectionstatechange = () => {
+      if (["failed", "disconnected", "closed"].includes(pc.connectionState)) endWebCall(false);
+    };
+    return pc;
+  }
+
+  async function setupPeerCommon(peerId, peerName) {
+    const stream = await localCallStream();
+    const pc = await createPeer();
+    if (stream) {
+      stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+    } else {
+      // No microphone: still negotiate an audio m-line so the user can hear
+      // the other side. The call becomes one-way until a microphone is present.
+      try { pc.addTransceiver("audio", { direction: "recvonly" }); } catch (e) {}
+    }
+    State.webCall = Object.assign(State.webCall || {}, { pc, localStream: stream, peerId, peerName, active: true });
+    return pc;
+  }
+
+  async function startWebCall() {
+    const target = privateCallTarget();
+    if (!target) { window.toast("Интернет-звонки доступны только в личных чатах", "error"); return; }
+    if (State.webCall && State.webCall.active) { window.toast("Звонок уже активен", "error"); return; }
+    State.webCall = { role: "caller", peerId: target.id, peerName: target.full_name || target.username, chatId: State.activeChatId, active: true };
+    ensureCallPanel("out", "Звонок…", target.full_name || target.username);
+    setCallActions(`<button class="btn-danger" id="wc-cancel">Завершить</button>`);
+    document.getElementById("wc-cancel").addEventListener("click", () => endWebCall(true));
+    callSend("call_invite", { to_user_id: target.id });
+  }
+
+  function onWebCallInvite(data) {
+    if (State.webCall && State.webCall.active) {
+      wsSend({ type: "call_reject", chat_id: data.chat_id, to_user_id: data.from_user_id, reason: "busy" });
+      return;
+    }
+    State.webCall = { role: "callee", peerId: data.from_user_id, peerName: data.from_name || "Собеседник", chatId: data.chat_id, active: true };
+    ensureCallPanel("incoming", "Входящий интернет-звонок", data.from_name || "Собеседник");
+    setCallActions(`<button class="btn-primary inline" id="wc-accept">Ответить</button><button class="btn-danger" id="wc-reject">Отклонить</button>`);
+    document.getElementById("wc-accept").addEventListener("click", acceptWebCall);
+    document.getElementById("wc-reject").addEventListener("click", () => { callSend("call_reject", { to_user_id: data.from_user_id }); cleanupWebCall(); });
+    playMessageSound();
+  }
+
+  async function acceptWebCall() {
+    if (!State.webCall) return;
+    ensureCallPanel("incoming", "Соединение…", State.webCall.peerName);
+    setCallActions(`<button class="btn-danger" id="wc-end">Завершить</button>`);
+    document.getElementById("wc-end").addEventListener("click", () => endWebCall(true));
+    callSend("call_accept", { to_user_id: State.webCall.peerId });
+  }
+
+  async function onWebCallAccept(data) {
+    if (!State.webCall || State.webCall.role !== "caller") return;
+    try {
+      const pc = await setupPeerCommon(data.from_user_id, data.from_name || State.webCall.peerName);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      ensureCallPanel("out", "Идёт звонок", State.webCall.peerName);
+      setCallActions(`<button class="btn-danger" id="wc-end">Завершить</button>`);
+      document.getElementById("wc-end").addEventListener("click", () => endWebCall(true));
+      callSend("call_signal", { signal: { sdp: pc.localDescription } });
+    } catch (e) { window.toast(e.message, "error"); endWebCall(true); }
+  }
+
+  function onWebCallReject(data) {
+    window.toast(data.reason === "busy" ? "Собеседник занят" : "Звонок отклонён", "error");
+    cleanupWebCall();
+  }
+
+  function onWebCallEnd() { cleanupWebCall(); window.toast("Звонок завершён"); }
+
+  async function onWebCallSignal(data) {
+    if (!State.webCall || data.from_user_id !== State.webCall.peerId) return;
+    try {
+      if (!State.webCall.pc) await setupPeerCommon(data.from_user_id, data.from_name || State.webCall.peerName);
+      const pc = State.webCall.pc;
+      const sig = data.signal || {};
+      if (sig.sdp) {
+        await pc.setRemoteDescription(new RTCSessionDescription(sig.sdp));
+        if (sig.sdp.type === "offer") {
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          ensureCallPanel("incoming", "Идёт звонок", State.webCall.peerName);
+          setCallActions(`<button class="btn-danger" id="wc-end">Завершить</button>`);
+          document.getElementById("wc-end").addEventListener("click", () => endWebCall(true));
+          callSend("call_signal", { signal: { sdp: pc.localDescription } });
+        }
+      }
+      if (sig.candidate) await pc.addIceCandidate(new RTCIceCandidate(sig.candidate));
+    } catch (e) { console.warn("call signal error", e); }
+  }
+
+  function endWebCall(notify) {
+    if (notify && State.webCall && State.webCall.peerId) callSend("call_end", { to_user_id: State.webCall.peerId });
+    cleanupWebCall();
+  }
+
+  function cleanupWebCall() {
+    if (State.webCall) {
+      try { if (State.webCall.localStream) State.webCall.localStream.getTracks().forEach((t) => t.stop()); } catch (e) {}
+      try { if (State.webCall.pc) State.webCall.pc.close(); } catch (e) {}
+    }
+    State.webCall = null;
+    hideCallPanel();
+  }
+
+
+  // ---------- Calls: incoming notifications + missed calls ----------
+  function callTitle(c) { return c.caller_name || c.caller_number || "Неизвестный номер"; }
+
+  async function loadMissedCallsUnread() {
+    try {
+      const r = await API.missedCallsUnreadCount();
+      State.missedCallsUnread = Math.max(0, parseInt(r.count || 0, 10));
+      updateCallsBadge();
+      updateUnreadIndicator();
+    } catch (e) {}
+  }
+
+  function updateCallsBadge() {
+    const b = document.getElementById("calls-unread-badge");
+    if (!b) return;
+    const n = State.missedCallsUnread || 0;
+    if (n > 0) {
+      b.style.display = "inline-flex";
+      b.textContent = n > 99 ? "99+" : String(n);
+      b.title = "Пропущенных вызовов: " + n;
+    } else {
+      b.style.display = "none";
+      b.textContent = "";
+    }
+  }
+
+  function recentCallKey(c) { return String((c && (c.id || c.linked_id || c.unique_id)) || ((c && c.caller_number) || "") + ":" + ((c && c.extension) || "")); }
+  function isRecentCall(map, key, ttlMs) {
+    const now = Date.now();
+    Object.keys(map).forEach((k) => { if (now - map[k] > ttlMs) delete map[k]; });
+    if (key && map[key] && now - map[key] <= ttlMs) return true;
+    if (key) map[key] = now;
+    return false;
+  }
+
+  function showIncomingCall(c) {
+    const key = recentCallKey(c);
+    if (isRecentCall(State.recentIncomingCalls, key, 60000)) return;
+    const title = "Входящий вызов";
+    const body = callTitle(c) + (c.extension ? " → " + c.extension : "");
+    window.toast(title + ": " + body, "success");
+    if (Prefs.get("sound")) playMessageSound();
+    let pop = document.getElementById("incoming-call-pop");
+    if (!pop) {
+      pop = document.createElement("div");
+      pop.id = "incoming-call-pop";
+      pop.className = "incoming-call-pop";
+      document.body.appendChild(pop);
+    }
+    pop.innerHTML = `
+      <div class="ic-icon">${icon("phone")}</div>
+      <div class="ic-body"><div class="ic-title">Входящий вызов</div><div class="ic-name">${escapeHtml(callTitle(c))}</div><div class="ic-sub">${escapeHtml((c.caller_name && c.caller_number ? c.caller_number + " · " : "") + (c.extension ? "на " + c.extension : ""))}</div></div>
+      <button class="ic-close">✕</button>`;
+    pop.classList.add("show");
+    pop.querySelector(".ic-close").addEventListener("click", () => pop.classList.remove("show"));
+    setTimeout(() => { if (pop) pop.classList.remove("show"); }, 5000);
+
+    // Call notifications are important even if regular chat notifications are
+    // disabled in settings. Browser still requires notification permission.
+    if ("Notification" in window) {
+      const show = () => {
+        try {
+          const n = new Notification(title, { body, tag: "cc-incoming-call-" + key, renotify: false, requireInteraction: false, silent: false });
+          n.onclick = () => { window.focus(); openCallsModal(); n.close(); };
+        } catch (e) {}
+      };
+      if (Notification.permission === "granted") show();
+      else if (Notification.permission !== "denied") Notification.requestPermission().then((p) => { if (p === "granted") show(); });
+    }
+  }
+
+  function showMissedCall(c) {
+    const key = recentCallKey(c);
+    if (isRecentCall(State.recentMissedCalls, key, 60000)) return;
+    const who = callTitle(c);
+    const number = c.caller_number ? (" · " + c.caller_number) : "";
+    const text = "Пропущенный вызов: " + who;
+    window.toast(text, "error");
+    if (Prefs.get("sound")) playMessageSound();
+    showMissedCallNotification(c, who + number);
+  }
+
+  function showMissedCallNotification(c, body) {
+    if (!("Notification" in window)) return;
+    const title = "Пропущенный вызов";
+    const opts = {
+      body: body || callTitle(c),
+      tag: "cc-missed-call-" + (c.id || c.caller_number || Date.now()),
+      renotify: true,
+      requireInteraction: false,
+      silent: false,
+      data: { route: "calls", call_id: c.id || null },
+    };
+    const show = () => {
+      try {
+        if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+          navigator.serviceWorker.ready.then((reg) => {
+            try {
+              reg.showNotification(title, Object.assign({}, opts, {
+                actions: [
+                  { action: "open_calls", title: "Открыть вызовы" },
+                  { action: "close", title: "Закрыть" },
+                ],
+              }));
+            } catch (e) {
+              const n = new Notification(title, opts);
+              n.onclick = () => { window.focus(); openCallsModal(); n.close(); };
+            }
+          });
+        } else {
+          const n = new Notification(title, opts);
+          n.onclick = () => { window.focus(); openCallsModal(); n.close(); };
+        }
+      } catch (e) {}
+    };
+    if (Notification.permission === "granted") show();
+    else if (Notification.permission !== "denied") {
+      Notification.requestPermission().then((perm) => { if (perm === "granted") show(); });
+    }
+  }
+
+  async function openCallsModal() {
+    const overlay = document.getElementById("modal-overlay");
+    overlay.innerHTML = `
+      <div class="modal modal-lg calls-modal">
+        <div class="modal-header"><h2>${icon("phone")} Вызовы</h2><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="call-tabs"><button class="call-tab active" data-status="missed">Пропущенные</button><button class="call-tab" data-status="">Все</button><button class="call-tab" data-status="answered">Принятые</button></div>
+          <div id="calls-list"><div class="list-empty">Загрузка…</div></div>
+        </div>
+        <div class="modal-footer"><button class="btn-secondary" id="calls-read-all">Отметить прочитанными</button><button class="btn-secondary" id="modal-cancel">Закрыть</button></div>
+      </div>`;
+    overlay.classList.add("show");
+    function close() { overlay.classList.remove("show"); overlay.innerHTML = ""; }
+    overlay.querySelector(".modal-close").addEventListener("click", close);
+    document.getElementById("modal-cancel").addEventListener("click", close);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    document.getElementById("calls-read-all").addEventListener("click", async () => { try { await API.markAllCallsRead(); State.missedCallsUnread = 0; updateCallsBadge(); updateUnreadIndicator(); renderCalls(currentStatus); } catch (e) { window.toast(e.message, "error"); } });
+    // Opening the calls panel is treated as reading missed-call notifications.
+    if (State.missedCallsUnread > 0) { API.markAllCallsRead().then(() => { State.missedCallsUnread = 0; updateCallsBadge(); updateUnreadIndicator(); }).catch(() => {}); }
+    let currentStatus = "missed";
+    overlay.querySelectorAll(".call-tab").forEach((b) => b.addEventListener("click", () => {
+      overlay.querySelectorAll(".call-tab").forEach((x) => x.classList.remove("active"));
+      b.classList.add("active"); currentStatus = b.getAttribute("data-status"); renderCalls(currentStatus);
+    }));
+    async function renderCalls(status) {
+      const list = document.getElementById("calls-list");
+      list.innerHTML = `<div class="list-empty">Загрузка…</div>`;
+      let rows = [];
+      try { rows = status === "missed" ? await API.missedCalls(100) : await API.listCalls(status, 100); }
+      catch (e) { list.innerHTML = `<div class="list-empty">${escapeHtml(e.message)}</div>`; return; }
+      if (!rows.length) { list.innerHTML = `<div class="list-empty">Вызовов нет</div>`; return; }
+      list.innerHTML = rows.map((c) => {
+        const callerName = c.caller_display || c.caller_name || "";
+        const callerNumber = c.caller_number || "номер не определён";
+        const calleeName = c.callee_display || "получатель не определён";
+        const rawCalleeNumber = c.callee_number || c.extension || "";
+        // Hide bogus route values like "1"; backend also now sends callee_number
+        // from the user's phone/office for old records where extension was wrong.
+        const calleeNumber = String(rawCalleeNumber).replace(/\D/g, "").length >= 2 ? rawCalleeNumber : "";
+        const when = new Date(c.started_at).toLocaleString("ru-RU");
+        const callerText = callerName && callerName !== callerNumber ? `${callerNumber} · ${callerName}` : callerNumber;
+        const calleeText = calleeNumber ? `${calleeNumber} · ${calleeName}` : calleeName;
+        const title = c.status === "answered"
+          ? `${callerText} ↔ ${calleeName}`
+          : callerText;
+        const line1 = `Звонивший: ${escapeHtml(callerText)}`;
+        const line2 = `Кому: ${escapeHtml(calleeText)} · ${when}`;
+        return `
+        <div class="call-row ${c.status} ${c.is_read ? "" : "unread"}" data-call-id="${c.id}">
+          <div class="call-icon">${c.status === "missed" ? icon("phoneMissed") : c.status === "answered" ? icon("check") : icon("phone")}</div>
+          <div class="call-info">
+            <div class="call-name">${escapeHtml(title)}</div>
+            <div class="call-meta"><div>${line1}</div><div>${line2}</div></div>
+          </div>
+          <span class="badge ${c.status === "missed" ? "off" : "on"}">${c.status === "missed" ? "пропущен" : c.status === "answered" ? "разговор" : c.status}</span>
+        </div>`;
+      }).join("");
+      list.querySelectorAll(".call-row.unread").forEach((r) => r.addEventListener("click", async () => { try { await API.markCallRead(r.getAttribute("data-call-id")); r.classList.remove("unread"); await loadMissedCallsUnread(); } catch (e) {} }));
+    }
+    renderCalls(currentStatus);
+  }
+
+
+  // ---------- Support tickets ----------
+  async function openSupportModal(openTicketId) {
+    const overlay = document.getElementById("modal-overlay");
+    overlay.innerHTML = `
+      <div class="modal modal-lg support-modal" id="support-modal">
+        <div class="modal-header"><h2>${icon("support")} Поддержка</h2><button class="modal-close">✕</button></div>
+        <div class="modal-body support-body">
+          <div class="support-layout">
+            <div id="support-list" class="support-list"><div class="list-empty">Загрузка…</div></div>
+            <div id="support-thread" class="support-thread"><div class="list-empty">Выберите обращение</div></div>
+          </div>
+        </div>
+        <div class="modal-footer"><button class="btn-primary inline" id="support-new">Новое обращение</button><button class="btn-secondary" id="modal-cancel">Закрыть</button></div>
+      </div>`;
+    overlay.classList.add("show");
+    function close() { overlay.classList.remove("show"); overlay.innerHTML = ""; }
+    overlay.querySelector(".modal-close").addEventListener("click", close);
+    document.getElementById("modal-cancel").addEventListener("click", close);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    document.getElementById("support-new").addEventListener("click", newSupportTicket);
+
+    let tickets = [];
+    let supportMeta = { priorities: ["low", "normal", "high", "critical"] };
+    try { const m = await API.supportMeta(); supportMeta.priorities = m.priorities || supportMeta.priorities; } catch (e) {}
+
+    function prLabel(p) {
+      return ({ low: "Низкий", normal: "Обычный", high: "Высокий", critical: "Критический" })[p] || p;
+    }
+
+    async function load(selectId) {
+      try { tickets = await API.supportTickets(); }
+      catch (e) { document.getElementById("support-list").innerHTML = `<div class="list-empty">${escapeHtml(e.message)}</div>`; return; }
+      renderList();
+      const id = selectId || openTicketId || (tickets[0] && tickets[0].id);
+      if (id) openTicket(id);
+    }
+
+    function statusLabel(s) {
+      return s === "closed" ? "закрыто" : (s === "pending" ? "ожидает" : "открыто");
+    }
+
+    function renderList() {
+      const list = document.getElementById("support-list");
+      if (!tickets.length) { list.innerHTML = `<div class="list-empty">Обращений пока нет</div>`; return; }
+      list.innerHTML = tickets.map((t) => `
+        <div class="support-ticket" data-ticket="${t.id}">
+          <b>${escapeHtml(t.subject)}</b>
+          <span>${escapeHtml(t.last_message || "")}</span>
+          <em>${prLabel(t.priority)} · ${statusLabel(t.status)}${t.unread ? " · новых " + t.unread : ""}</em>
+        </div>`).join("");
+      list.querySelectorAll("[data-ticket]").forEach((el) =>
+        el.addEventListener("click", () => openTicket(parseInt(el.getAttribute("data-ticket"), 10))));
+    }
+
+    async function openTicket(id) {
+      const t = tickets.find((x) => x.id === id);
+      if (!t) return;
+      const box = document.getElementById("support-thread");
+      box.innerHTML = `<div class="list-empty">Загрузка…</div>`;
+      let msgs = [];
+      try { msgs = await API.supportMessages(id); }
+      catch (e) { box.innerHTML = `<div class="list-empty">${escapeHtml(e.message)}</div>`; return; }
+      box.innerHTML = `
+        <div class="support-thread-head"><div><b>${escapeHtml(t.subject)}</b><div class="settings-sub">${prLabel(t.priority)}</div></div><span>${statusLabel(t.status)}</span></div>
+        <div class="support-messages">${msgs.map((m) => `
+          <div class="support-msg ${m.sender_role === "admin" ? "admin" : "user"}">
+            <b>${escapeHtml(m.sender_name)}</b><p>${escapeHtml(m.text)}</p><span>${new Date(m.created_at).toLocaleString("ru-RU")}</span>
+          </div>`).join("")}</div>
+        ${t.status !== "closed" ? `<div class="support-reply"><textarea id="support-reply-text" rows="3" placeholder="Ваш ответ…"></textarea><button class="btn-primary inline" id="support-send">Отправить</button></div>` : `<div class="settings-sub">Обращение закрыто</div>`}`;
+      const send = document.getElementById("support-send");
+      if (send) send.addEventListener("click", async () => {
+        const txt = document.getElementById("support-reply-text").value.trim();
+        if (!txt) return;
+        try { await API.supportReply(id, txt); await load(id); }
+        catch (e) { window.toast(e.message, "error"); }
+      });
+    }
+
+    async function newSupportTicket() {
+      let sheet = document.getElementById("support-create-sheet");
+      if (!sheet) { sheet = document.createElement("div"); sheet.id = "support-create-sheet"; sheet.className = "note-sheet-overlay"; document.body.appendChild(sheet); }
+      sheet.innerHTML = `
+        <div class="note-sheet"><div class="note-sheet-handle"></div>
+          <div class="note-sheet-head"><h3>Новое обращение</h3><button class="modal-close" id="sup-close">✕</button></div>
+          <div class="note-form">
+            <label>Приоритет<select id="sup-priority" class="set-select">${supportMeta.priorities.map((p) => `<option value="${p}" ${p === "normal" ? "selected" : ""}>${prLabel(p)}</option>`).join("")}</select></label>
+            <label>Тема<input id="sup-subject" placeholder="Например: Не работает принтер"></label>
+            <label>Описание<textarea id="sup-text" rows="5" placeholder="Опишите проблему…"></textarea></label>
+          </div>
+          <div class="note-sheet-actions"><button class="btn-secondary" id="sup-cancel">Отмена</button><button class="btn-primary inline" id="sup-save">Создать</button></div>
+        </div>`;
+      sheet.classList.add("show");
+      const closeSheet = () => { sheet.classList.remove("show"); sheet.innerHTML = ""; };
+      document.getElementById("sup-close").onclick = closeSheet;
+      document.getElementById("sup-cancel").onclick = closeSheet;
+      setTimeout(() => document.getElementById("sup-subject").focus(), 80);
+      document.getElementById("sup-save").onclick = async () => {
+        const subject = document.getElementById("sup-subject").value.trim();
+        const text = document.getElementById("sup-text").value.trim();
+        if (!subject || !text) { window.toast("Заполните тему и описание", "error"); return; }
+        try {
+          const t = await API.supportCreate({ subject, text, category: "general", priority: document.getElementById("sup-priority").value });
+          closeSheet(); await load(t.id);
+        } catch (e) { window.toast(e.message, "error"); }
+      };
+    }
+
+    await load(openTicketId);
+  }
+
 
   // ---------- Contact book (all company users) ----------
   async function openContactsModal() {
@@ -433,7 +1500,7 @@
     overlay.innerHTML = `
       <div class="modal modal-lg">
         <div class="modal-header">
-          <h2>📇 Контактная книга</h2>
+          <h2>${icon("contacts")} Контактная книга</h2>
           <button class="modal-close">✕</button>
         </div>
         <div class="modal-body">
@@ -499,7 +1566,7 @@
         <div class="contact-name">${escapeHtml(u.full_name || u.username)}</div>
         <div class="contact-sub">@${escapeHtml(u.username)}${u.email ? " · " + escapeHtml(u.email) : ""} · ${status}</div>
       </div>
-      <button class="contact-msg" title="Написать сообщение">💬</button>
+      <button class="contact-msg" title="Написать сообщение">${icon("chat")}</button>
     </div>`;
   }
 
@@ -538,6 +1605,7 @@
           </div>
         </div>
         <div class="modal-footer">
+          <button class="btn-secondary" id="uc-call">Позвонить</button>
           <button class="btn-primary inline" id="uc-message">Написать сообщение</button>
         </div>
       </div>`;
@@ -545,15 +1613,39 @@
     function close() { overlay.classList.remove("show"); overlay.innerHTML = ""; }
     overlay.querySelector(".modal-close").addEventListener("click", close);
     overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    const callBtn = document.getElementById("uc-call");
+    if (callBtn) callBtn.addEventListener("click", () => startOneToOneCall(u.id));
     document.getElementById("uc-message").addEventListener("click", () => { close(); startPrivateChat(u.id); });
   }
 
   function openDrawer() { document.getElementById("drawer").classList.add("show"); document.getElementById("drawer-overlay").classList.add("show"); }
   function closeDrawer() { document.getElementById("drawer").classList.remove("show"); document.getElementById("drawer-overlay").classList.remove("show"); }
 
+
+  function returnToAdmin() {
+    const token = localStorage.getItem("cc_admin_token");
+    const user = localStorage.getItem("cc_admin_user");
+    if (!token || !user) { window.toast("Сохранённая админ-сессия не найдена", "error"); return; }
+    try {
+      API.Store.setToken(token);
+      API.Store.setUser(JSON.parse(user));
+      localStorage.removeItem("cc_admin_token");
+      localStorage.removeItem("cc_admin_user");
+      localStorage.removeItem("cc_impersonated_at");
+      disconnectWS();
+      window.toast("Вы вернулись в админ-сессию", "success");
+      Router.navigate("/admin");
+    } catch (e) {
+      window.toast("Не удалось восстановить админ-сессию", "error");
+    }
+  }
+
   function logout() {
     disconnectWS();
     API.Store.clearAll();
+    localStorage.removeItem("cc_admin_token");
+    localStorage.removeItem("cc_admin_user");
+    localStorage.removeItem("cc_impersonated_at");
     window.toast("Вы вышли из аккаунта");
     Router.navigate("/login");
   }
@@ -583,7 +1675,8 @@
   const _baseTitle = "Corporate Chat";
   let _lastUnread = -1;
   function totalUnread() {
-    return (State.chats || []).reduce((sum, c) => sum + (c.is_muted ? 0 : (c.unread || 0)), 0);
+    const chatUnread = (State.chats || []).reduce((sum, c) => sum + (c.is_muted ? 0 : (c.unread || 0)), 0);
+    return chatUnread + (State.missedCallsUnread || 0);
   }
   function updateUnreadIndicator() {
     const n = totalUnread();
@@ -620,19 +1713,23 @@
   function renderChatList(chats) {
     const list = document.getElementById("chat-list");
     if (!list) return;
-    if (!chats.length) {
-      list.innerHTML = `<div class="list-empty">Нет чатов.<br>Нажмите ✏️ чтобы начать новый чат.</div>`;
+    renderChatFilters();
+    const visibleChats = filteredChats(chats);
+    if (!visibleChats.length) {
+      const label = { all: "Нет чатов", private: "Нет личных чатов", groups: "Нет групп", channels: "Нет каналов", unread: "Нет непрочитанных", favorites: "Нет избранных чатов", archive: "Архив пуст" }[State.chatFilter] || "Нет чатов";
+      list.innerHTML = `<div class="list-empty">${label}.<br>${State.chatFilter === "all" ? "Нажмите кнопку «Новый чат» чтобы начать общение." : ""}</div>`;
       return;
     }
-    list.innerHTML = chats.map((c) => {
+    list.innerHTML = visibleChats.map((c) => {
       const online = c.members && c.members.some((m) => m.id !== State.me.id && m.is_online);
       const isGroup = c.type !== "private";
+      const isChannel = c.type === "channel";
       return `
       <div class="chat-item ${c.id === State.activeChatId ? "active" : ""}" data-chat-id="${c.id}">
-        ${avatarHtml({ url: c.avatar_url, color: c.avatar_color, name: c.name, isGroup, extra: online ? '<span class="online-dot"></span>' : "" })}
+        ${avatarHtml({ url: c.avatar_url, color: c.avatar_color, name: c.name, isGroup, isChannel, extra: online ? '<span class="online-dot"></span>' : "" })}
         <div class="chat-meta">
           <div class="chat-top">
-            <span class="chat-name">${c.is_muted ? "🔇 " : ""}${escapeHtml(c.name)}</span>
+            <span class="chat-name">${ChatPrefs.isFavorite(c.id) ? "⭐ " : ""}${ChatPrefs.isArchived(c.id) ? "🗄️ " : ""}${c.is_muted ? "🔇 " : ""}${escapeHtml(c.name)}</span>
             <span class="chat-time">${c.last_message_at ? formatTime(c.last_message_at) : ""}</span>
           </div>
           <div class="chat-bottom">
@@ -681,7 +1778,9 @@
       canDelete = amGroupAdmin || chat.created_by === State.me.id || State.me.role === "admin";
     }
     const items = [];
-    items.push({ act: "open", icon: "💬", label: "Открыть" });
+    items.push({ act: "open", icon: icon("chat"), label: "Открыть" });
+    items.push({ act: "favorite", icon: ChatPrefs.isFavorite(chatId) ? "⭐" : "☆", label: ChatPrefs.isFavorite(chatId) ? "Убрать из избранного" : "В избранное" });
+    items.push({ act: "archive", icon: ChatPrefs.isArchived(chatId) ? "📤" : "🗄️", label: ChatPrefs.isArchived(chatId) ? "Вернуть из архива" : "В архив" });
     if (canDelete) items.push({ sep: true }, { act: "delete", icon: "🗑️", label: "Удалить чат", danger: true });
 
     const menu = document.createElement("div");
@@ -702,6 +1801,8 @@
       const act = item.getAttribute("data-act");
       closeChatListMenu();
       if (act === "open") Router.navigate("/chats/" + chatId);
+      else if (act === "favorite") { ChatPrefs.toggleFavorite(chatId); renderChatList(State.chats); }
+      else if (act === "archive") { ChatPrefs.toggleArchive(chatId); renderChatList(State.chats); }
       else if (act === "delete") confirmDeleteChat(chat);
     });
     setTimeout(() => {
@@ -712,7 +1813,7 @@
 
   async function confirmDeleteChat(chat) {
     const what = chat.type !== "private" ? `группу «${chat.name}»` : "этот чат";
-    if (!confirm(`Удалить ${what}? Все сообщения будут удалены. Действие необратимо.`)) return;
+    if (!(await uiConfirm(`Удалить ${what}? Все сообщения будут удалены. Действие необратимо.`))) return;
     try {
       await API.deleteChat(chat.id);
       window.toast("Чат удалён", "success");
@@ -746,8 +1847,9 @@
 
   function chatItemHtml(c) {
     const isGroup = c.type !== "private";
+    const isChannel = c.type === "channel";
     return `<div class="chat-item" data-chat-id="${c.id}">
-      ${avatarHtml({ url: c.avatar_url, color: c.avatar_color, name: c.name, isGroup })}
+      ${avatarHtml({ url: c.avatar_url, color: c.avatar_color, name: c.name, isGroup, isChannel })}
       <div class="chat-meta"><div class="chat-top"><span class="chat-name">${escapeHtml(c.name)}</span></div>
       <div class="chat-last">${c.last_message ? escapeHtml(c.last_message.slice(0, 60)) : "Нет сообщений"}</div></div></div>`;
   }
@@ -768,7 +1870,11 @@
     State.replyTo = null;
     State.editingId = null;
     State.forwardMsgId = null;
+    State.selectionMode = false;
+    State.selectedMessageIds = new Set();
+    State.composerImportance = "normal";
     State.pendingAttachments = [];
+    State.recentFileDrops = {};
     const typing = document.getElementById("typing-indicator");
     if (typing) typing.textContent = "";
     clearTimeout(State.typingClear);
@@ -803,11 +1909,12 @@
     area.innerHTML = `
       <div class="chat-header">
         <button class="back-btn" id="back-btn">‹</button>
-        ${avatarHtml({ url: chat.avatar_url, color: chat.avatar_color, name: chat.name, isGroup: chat.type !== "private", size: "sm", id: "ch-avatar" })}
+        ${avatarHtml({ url: chat.avatar_url, color: chat.avatar_color, name: chat.name, isGroup: chat.type !== "private", isChannel: chat.type === "channel", size: "sm", id: "ch-avatar" })}
         <div class="chat-header-info" id="ch-info-click" style="cursor:pointer">
           <div class="chat-header-name" id="ch-name">${escapeHtml(chat.name)}</div>
           <div class="chat-header-status" id="header-status"></div>
         </div>
+        ${chat.type === "private" ? '<button class="icon-btn" id="web-call-btn" title="Позвонить через интернет">☎️</button>' : ""}
         <button class="icon-btn" id="chat-search-btn" title="Поиск в чате">🔍</button>
         <button class="icon-btn" id="chat-info-btn" title="Информация">ⓘ</button>
       </div>
@@ -816,10 +1923,12 @@
         <input type="text" id="in-chat-search" placeholder="Поиск сообщений..." />
         <button class="icon-btn" id="close-search">✕</button>
       </div>
+      <div class="multi-select-bar" id="multi-select-bar" style="display:none"></div>
       <div class="messages" id="messages"></div>
       <div class="drop-overlay" id="drop-overlay">
         <div class="drop-card"><div class="drop-icon">📎</div><div class="drop-text">Перетащите файлы сюда, чтобы отправить</div></div>
       </div>
+      <button class="scroll-top-btn" id="scroll-top-btn" title="Вверх">⬆</button>
       <button class="scroll-bottom-btn" id="scroll-bottom-btn" title="Вниз">⬇</button>
       <div class="typing-indicator" id="typing-indicator"></div>
       <div class="composer" id="composer">
@@ -829,8 +1938,13 @@
         </div>
         <div class="attach-preview" id="attach-preview"></div>
         <div class="composer-row">
-          <button class="emoji-btn" id="attach-btn" title="Прикрепить файл">📎</button>
-          <button class="emoji-btn" id="emoji-btn" title="Эмодзи">😊</button>
+          <button class="emoji-btn" id="attach-btn" title="Прикрепить файл">${icon("attach")}</button>
+          <button class="emoji-btn" id="emoji-btn" title="Эмодзи">${icon("smile")}</button>
+          <select id="importance-select" class="importance-select" title="Важность сообщения">
+            <option value="normal">Обычное</option>
+            <option value="important">Важное</option>
+            <option value="critical">Критичное</option>
+          </select>
           <textarea id="composer-input" rows="1" placeholder="Сообщение..."></textarea>
           <button class="send-btn" id="send-btn" title="Отправить">➤</button>
         </div>
@@ -844,6 +1958,8 @@
       State.activeChatId = null; Router.navigate("/chats");
     });
     document.getElementById("chat-info-btn").addEventListener("click", openChatInfo);
+    const webCallBtn = document.getElementById("web-call-btn");
+    if (webCallBtn) webCallBtn.addEventListener("click", startWebCall);
     document.getElementById("ch-info-click").addEventListener("click", openChatInfo);
     document.getElementById("chat-search-btn").addEventListener("click", toggleInChatSearch);
     document.getElementById("close-search").addEventListener("click", toggleInChatSearch);
@@ -862,18 +1978,23 @@
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey && Prefs.get("enterToSend")) { e.preventDefault(); doSend(); }
     });
+    const impSel = document.getElementById("importance-select");
+    if (impSel) impSel.addEventListener("change", () => { State.composerImportance = impSel.value || "normal"; });
     document.getElementById("send-btn").addEventListener("click", doSend);
 
     const msgsBox = document.getElementById("messages");
     const sbBtn = document.getElementById("scroll-bottom-btn");
+    const stBtn = document.getElementById("scroll-top-btn");
     msgsBox.addEventListener("scroll", () => {
       const nearBottom = msgsBox.scrollHeight - msgsBox.scrollTop - msgsBox.clientHeight < 120;
       sbBtn.classList.toggle("show", !nearBottom);
+      if (stBtn) stBtn.classList.toggle("show", msgsBox.scrollTop > 500);
       // Lazy-load older messages when scrolled near the top (Telegram-style)
       if (msgsBox.scrollTop < 150 && State.hasMoreOlder && !State.loadingOlder) {
         loadOlderMessages();
       }
     });
+    if (stBtn) stBtn.addEventListener("click", () => { msgsBox.scrollTop = 0; stBtn.classList.remove("show"); });
     sbBtn.addEventListener("click", () => { msgsBox.scrollTop = msgsBox.scrollHeight; sbBtn.classList.remove("show"); });
 
     initAttachments();
@@ -902,7 +2023,7 @@
       st.classList.toggle("online", !!online && !away);
     } else {
       const onlineCount = chat.members.filter((m) => m.is_online).length;
-      st.textContent = chat.members.length + " участников, " + onlineCount + " в сети";
+      st.textContent = chat.type === "channel" ? (chat.members.length + " подписчиков") : (chat.members.length + " участников, " + onlineCount + " в сети");
       st.classList.remove("online");
     }
   }
@@ -958,9 +2079,15 @@
       html += `<div class="load-older" id="load-older"><div class="mini-spinner"></div></div>`;
     }
     let lastDate = "";
+    let unreadSepShown = false;
+    const lastRead = (State.activeChat && State.activeChat.last_read_message_id) || 0;
     State.messages.forEach((m) => {
       const d = formatDate(m.created_at);
       if (d !== lastDate) { html += `<div class="date-sep">${d}</div>`; lastDate = d; }
+      if (!unreadSepShown && lastRead && m.id > lastRead && m.sender_id !== State.me.id && !m.is_system) {
+        html += `<div class="unread-sep" id="first-unread-sep">Новые сообщения</div>`;
+        unreadSepShown = true;
+      }
       html += messageHtml(m, State.messages);
     });
     box.innerHTML = html;
@@ -1064,10 +2191,14 @@
         <button data-act="menu" data-id="${m.id}" title="Ещё">⋯</button>
       </div>`;
 
+    const selected = State.selectedMessageIds && State.selectedMessageIds.has(m.id);
+    const importance = m.importance || "normal";
     return `
-      <div class="msg-row ${out ? "out" : "in"}" data-msg-id="${m.id}">
-        <div class="msg-bubble ${m.is_pinned ? "pinned" : ""}">
+      <div class="msg-row ${out ? "out" : "in"} ${State.selectionMode ? "select-mode" : ""} ${selected ? "selected" : ""}" data-msg-id="${m.id}">
+        ${State.selectionMode && !m.is_system ? `<label class="msg-select"><input type="checkbox" data-select-msg="${m.id}" ${selected ? "checked" : ""}></label>` : ""}
+        <div class="msg-bubble ${m.is_pinned ? "pinned" : ""} ${importance !== "normal" ? "importance-" + importance : ""}">
           ${m.is_pinned ? '<span class="pin-flag" title="Закреплено">📌</span>' : ""}
+          ${importance === "important" ? '<div class="importance-label">⚠️ Важное</div>' : (importance === "critical" ? '<div class="importance-label critical">🚨 Критичное</div>' : "")}
           ${senderLabel}
           ${body}
           ${reactionsHtml}
@@ -1120,7 +2251,7 @@
   // File types the browser can display inline (open without downloading).
   function isOpenableExt(ext) {
     return [
-      "pdf", "txt", "log", "csv", "json", "xml", "md", "html", "htm",
+      "pdf", "docx", "xlsx", "xlsm", "txt", "log", "csv", "json", "xml", "md", "html", "htm",
       "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg",
       "mp4", "webm", "ogg", "mp3", "wav", "m4a",
     ].indexOf((ext || "").toLowerCase()) >= 0;
@@ -1137,6 +2268,14 @@
     box.addEventListener("click", (e) => {
       const t = e.target;
       if (!t || typeof t.closest !== "function") return;
+      const selCb = t.closest("input[data-select-msg]");
+      if (selCb) {
+        const id = parseInt(selCb.getAttribute("data-select-msg"), 10);
+        if (selCb.checked) State.selectedMessageIds.add(id); else State.selectedMessageIds.delete(id);
+        updateMultiSelectBar();
+        const row = selCb.closest(".msg-row"); if (row) row.classList.toggle("selected", selCb.checked);
+        return;
+      }
       const actBtn = t.closest(".msg-actions button");
       if (actBtn) {
         e.stopPropagation();
@@ -1154,9 +2293,22 @@
       }
       const img = t.closest(".msg-image");
       if (img) { openLightbox(img.getAttribute("data-full"), img.getAttribute("data-name")); return; }
-      // file card: explicit ⬇/↗ buttons are native <a> links and work on their
-      // own. A click anywhere else on the card opens (if viewable) or downloads.
-      if (t.closest(".file-act")) return;   // let the native link handle it
+      // file card: explicit ⬇/↗ buttons log history; open uses in-app preview
+      // when possible, download remains a native <a download>.
+      const fileAct = t.closest(".file-act");
+      if (fileAct) {
+        const card = fileAct.closest(".msg-file");
+        const url = card && card.getAttribute("data-fileurl");
+        const fname = card && card.getAttribute("data-filename");
+        if (fileAct.getAttribute("data-act") === "open") {
+          e.preventDefault();
+          const canOpen = card && card.getAttribute("data-canopen") === "1";
+          openOrDownloadFile(url, fname, canOpen);
+        } else {
+          API.logDownload(url, fname, "download").catch(() => {});
+        }
+        return;
+      }
       const card = t.closest(".msg-file");
       if (card) {
         const url = card.getAttribute("data-fileurl");
@@ -1181,6 +2333,37 @@
     });
   }
 
+
+  function enterSelectionMode(id) {
+    State.selectionMode = true;
+    if (!State.selectedMessageIds) State.selectedMessageIds = new Set();
+    if (id) State.selectedMessageIds.add(id);
+    rerenderMessages();
+    updateMultiSelectBar();
+  }
+
+  function exitSelectionMode() {
+    State.selectionMode = false;
+    State.selectedMessageIds = new Set();
+    rerenderMessages();
+    updateMultiSelectBar();
+  }
+
+  function updateMultiSelectBar() {
+    const bar = document.getElementById("multi-select-bar");
+    if (!bar) return;
+    const count = State.selectedMessageIds ? State.selectedMessageIds.size : 0;
+    if (!State.selectionMode || count === 0) { bar.style.display = "none"; bar.innerHTML = ""; return; }
+    bar.style.display = "flex";
+    bar.innerHTML = `<b>Выбрано: ${count}</b><button class="mini-btn" id="ms-forward">Переслать</button><button class="mini-btn" id="ms-copy">Копировать текст</button><button class="mini-btn" id="ms-cancel">Отмена</button>`;
+    document.getElementById("ms-cancel").onclick = exitSelectionMode;
+    document.getElementById("ms-forward").onclick = () => openForwardModal(Array.from(State.selectedMessageIds));
+    document.getElementById("ms-copy").onclick = () => {
+      const text = State.messages.filter((m) => State.selectedMessageIds.has(m.id) && m.text).map((m) => m.sender_name + ": " + m.text).join("\n");
+      if (navigator.clipboard) navigator.clipboard.writeText(text).then(() => window.toast("Скопировано", "success"));
+    };
+  }
+
   // ---------- Context menu (right-click / ⋯) ----------
   function closeContextMenu() {
     const m = document.getElementById("ctx-menu");
@@ -1200,11 +2383,12 @@
     const hasText = !!(m.text && m.text.trim());
 
     const items = [];
-    if (can("can_send_messages")) items.push({ act: "reply", icon: "↩️", label: "Ответить" });
+    if (canWriteActiveChat()) items.push({ act: "reply", icon: "↩️", label: "Ответить" });
     if (hasText) items.push({ act: "copy", icon: "📋", label: "Копировать" });
+    items.push({ act: "select", icon: "☑️", label: "Выбрать" });
     if (can("can_forward")) items.push({ act: "forward", icon: "↪️", label: "Переслать" });
     if (canPin) items.push({ act: "pin", icon: "📌", label: m.is_pinned ? "Открепить" : "Закрепить" });
-    if (out && hasText && (can("can_edit_own") || isAdmin)) items.push({ act: "edit", icon: "✏️", label: "Редактировать" });
+    if (out && hasText && (can("can_edit_own") || isAdmin)) items.push({ act: "edit", icon: icon("edit"), label: "Редактировать" });
     if (canDelete) items.push({ sep: true }, { act: "delete", icon: "🗑️", label: "Удалить", danger: true });
 
     const menu = document.createElement("div");
@@ -1231,6 +2415,7 @@
         closeContextMenu();
         if (act === "reply") setReply(id);
         else if (act === "copy") copyMessage(id);
+        else if (act === "select") enterSelectionMode(id);
         else if (act === "forward") openForwardModal(id);
         else if (act === "pin") doPin(id);
         else if (act === "edit") startEdit(id);
@@ -1303,7 +2488,7 @@
     document.getElementById("reply-preview").classList.add("show");
   }
   async function doDelete(id) {
-    if (!confirm("Удалить сообщение?")) return;
+    if (!(await uiConfirm("Удалить сообщение?"))) return;
     try { await API.deleteMessage(State.activeChatId, id); } catch (e) { window.toast(e.message, "error"); }
   }
   async function doPin(id) {
@@ -1313,6 +2498,7 @@
 
   async function doSend() {
     const input = document.getElementById("composer-input");
+    if (!canWriteActiveChat()) { window.toast("В канал могут писать только администраторы", "error"); return; }
     const text = input.value.trim();
     const atts = State.pendingAttachments.slice();
 
@@ -1350,8 +2536,10 @@
             attachment_size: r.size || 0,
             attachment_w: r.width || 0,
             attachment_h: r.height || 0,
+            importance: i === 0 ? State.composerImportance : "normal",
           });
         }
+        State.composerImportance = "normal"; const imp = document.getElementById("importance-select"); if (imp) imp.value = "normal";
       } catch (err) { window.toast(err.message, "error"); }
       return;
     }
@@ -1359,8 +2547,9 @@
     if (!text) return;
     input.value = ""; input.style.height = "auto";
     try {
-      await API.sendMessage(State.activeChatId, { text, reply_to: State.replyTo });
+      await API.sendMessage(State.activeChatId, { text, reply_to: State.replyTo, importance: State.composerImportance });
       clearReply();
+      State.composerImportance = "normal"; const imp = document.getElementById("importance-select"); if (imp) imp.value = "normal";
     } catch (err) { window.toast(err.message, "error"); input.value = text; }
   }
 
@@ -1380,6 +2569,8 @@
       if (m) { m.is_online = online; updateChatHeader(); }
     }
     State.chats.forEach((c) => c.members && c.members.forEach((m) => { if (m.id === userId) m.is_online = online; }));
+    updatePresenceDom(userId, online, status);
+    try { window.dispatchEvent(new CustomEvent("cc:presence", { detail: { userId, online, status: status || (online ? "online" : "offline") } })); } catch (e) {}
     if (Router.currentPath().startsWith("/chats")) renderChatList(State.chats);
     // refresh the online sidebar (debounced to avoid thrashing on bursts)
     clearTimeout(State.rsRefreshTimer);
@@ -1387,6 +2578,39 @@
       const rs = document.getElementById("rs-search");
       loadRightSidebar(rs ? rs.value.trim() : "");
     }, 400);
+  }
+
+  function updatePresenceDom(userId, online, status) {
+    // Org-structure modal: update dots and department online counters in place.
+    document.querySelectorAll(`.org-member[data-uid="${userId}"]`).forEach((row) => {
+      const wasOnline = row.getAttribute("data-online") === "1";
+      row.setAttribute("data-online", online ? "1" : "0");
+      const av = row.querySelector(".avatar");
+      if (av) {
+        let dot = av.querySelector(".online-dot");
+        if (online) {
+          if (!dot) { dot = document.createElement("span"); dot.className = "online-dot"; av.appendChild(dot); }
+          dot.classList.toggle("away", status === "away");
+        } else if (dot) {
+          dot.remove();
+        }
+      }
+      const dept = row.closest(".org-dept");
+      const cnt = dept && dept.querySelector(".org-dept-count b");
+      if (cnt && wasOnline !== !!online) {
+        const n = Math.max(0, parseInt(cnt.textContent || "0", 10) + (online ? 1 : -1));
+        cnt.textContent = String(n);
+      }
+    });
+
+    // Any visible contact/right-sidebar/user-card avatars with the same data attr.
+    document.querySelectorAll(`[data-live-user="${userId}"] .avatar`).forEach((av) => {
+      let dot = av.querySelector(".online-dot");
+      if (online) {
+        if (!dot) { dot = document.createElement("span"); dot.className = "online-dot"; av.appendChild(dot); }
+        dot.classList.toggle("away", status === "away");
+      } else if (dot) dot.remove();
+    });
   }
 
   // ---- Idle / away watcher: marks me "away" after 15 min of no activity ----
@@ -1565,8 +2789,23 @@
     }
   }
 
+  function fileSig(file) {
+    return [file.name || "file", file.size || 0, file.lastModified || 0, file.type || ""].join("|");
+  }
+
   function handleFiles(files) {
+    const now = Date.now();
     files.forEach((file) => {
+      const sig = fileSig(file);
+      // Some browsers fire both the composer and chat-area drop handlers for
+      // the same drag operation. Also protect against accidental double-drop of
+      // the same file while it is already in the pending preview.
+      const recentAt = State.recentFileDrops[sig] || 0;
+      const alreadyPending = State.pendingAttachments.some((a) => fileSig(a.file) === sig);
+      if (alreadyPending || (now - recentAt) < 1800) return;
+      State.recentFileDrops[sig] = now;
+      // prune old signatures
+      Object.keys(State.recentFileDrops).forEach((k) => { if (now - State.recentFileDrops[k] > 10000) delete State.recentFileDrops[k]; });
       const tempId = "att" + (++tempCounter);
       const kind = IMAGE_MIME.test(file.type) ? "image" : "file";
       const item = { tempId, file, kind, status: "uploading", progress: 0, result: null, preview: null };
@@ -1667,17 +2906,20 @@
   }
 
   // ---------- New chat / group modal ----------
-  async function openNewChatModal(groupMode) {
+  async function openNewChatModal(groupMode, channelMode) {
+    channelMode = !!channelMode;
     const overlay = document.getElementById("modal-overlay");
+    const title = channelMode ? "Новый канал" : (groupMode ? "Новая группа" : "Новый чат");
     overlay.innerHTML = `
       <div class="modal">
-        <div class="modal-header"><h2>${groupMode ? "Новая группа" : "Новый чат"}</h2><button class="modal-close">✕</button></div>
+        <div class="modal-header"><h2>${title}</h2><button class="modal-close">✕</button></div>
         <div class="modal-body">
-          <div id="group-name-field" class="field" style="${groupMode ? "" : "display:none"}">
-            <label>Название группы</label>
-            <input type="text" id="group-name" placeholder="Например: Команда разработки" />
+          ${channelMode ? '<div class="settings-warn">${icon("channel")} Канал — это объявления: писать могут только администраторы канала и глобальные администраторы, остальные участники только читают.</div>' : ""}
+          <div id="group-name-field" class="field" style="${(groupMode || channelMode) ? "" : "display:none"}">
+            <label>${channelMode ? "Название канала" : "Название группы"}</label>
+            <input type="text" id="group-name" placeholder="${channelMode ? "Например: Объявления компании" : "Например: Команда разработки"}" />
           </div>
-          <div class="field"><input type="text" id="user-search" placeholder="Поиск пользователей..." /></div>
+          <div class="field"><input type="text" id="user-search" placeholder="${channelMode ? "Добавить подписчиков из пользователей..." : "Поиск пользователей..."}" /></div>
           <div id="user-pick-list"></div>
         </div>
         <div class="modal-footer">
@@ -1713,19 +2955,26 @@
       }));
     }
     function update() {
-      createBtn.disabled = selected.size === 0;
-      if (groupMode) groupField.style.display = "block";
+      const nameEl = document.getElementById("group-name");
+      createBtn.disabled = channelMode ? !(nameEl && nameEl.value.trim()) : selected.size === 0;
+      if (groupMode || channelMode) groupField.style.display = "block";
       else groupField.style.display = selected.size > 1 ? "block" : "none";
     }
     let t = null;
     searchInput.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => renderUsers(searchInput.value.trim()), 250); });
+    const groupNameInput = document.getElementById("group-name");
+    if (groupNameInput) groupNameInput.addEventListener("input", update);
     renderUsers("");
     createBtn.addEventListener("click", async () => {
       const ids = Array.from(selected);
       try {
         let chat;
         const wantGroup = groupMode || ids.length > 1;
-        if (!wantGroup) chat = await API.createChat({ type: "private", member_ids: ids });
+        if (channelMode) {
+          const name = document.getElementById("group-name").value.trim();
+          if (!name) { window.toast("Введите название канала", "error"); return; }
+          chat = await API.createChat({ type: "channel", name, member_ids: ids });
+        } else if (!wantGroup) chat = await API.createChat({ type: "private", member_ids: ids });
         else {
           const name = document.getElementById("group-name").value.trim() || "Группа";
           chat = await API.createChat({ type: "group", name, member_ids: ids });
@@ -1736,13 +2985,14 @@
   }
 
   // ---------- Forward modal ----------
-  async function openForwardModal(messageId) {
+  async function openForwardModal(messageIds) {
+    const ids = Array.isArray(messageIds) ? messageIds : [messageIds];
     const overlay = document.getElementById("modal-overlay");
     overlay.innerHTML = `
       <div class="modal">
-        <div class="modal-header"><h2>Переслать в…</h2><button class="modal-close">✕</button></div>
+        <div class="modal-header"><h2>Переслать (${ids.length})</h2><button class="modal-close">✕</button></div>
         <div class="modal-body" id="fwd-list"></div>
-        <div class="modal-footer"><button class="btn-secondary" id="modal-cancel">Отмена</button></div>
+        <div class="modal-footer"><button class="btn-secondary" id="modal-cancel">Отмена</button><button class="btn-primary inline" id="fwd-send" disabled>Переслать</button></div>
       </div>`;
     overlay.classList.add("show");
     function close() { overlay.classList.remove("show"); overlay.innerHTML = ""; }
@@ -1750,17 +3000,35 @@
     document.getElementById("modal-cancel").addEventListener("click", close);
     overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
     const list = document.getElementById("fwd-list");
-    list.innerHTML = State.chats.map((c) => `
-      <div class="user-pick-item" data-id="${c.id}">
-        ${avatarHtml({ url: c.avatar_url, color: c.avatar_color, name: c.name, isGroup: c.type !== "private", size: "sm" })}
-        <div class="user-pick-name"><div class="un">${escapeHtml(c.name)}</div></div>
-      </div>`).join("") || `<div class="list-empty">Нет доступных чатов</div>`;
-    list.querySelectorAll(".user-pick-item").forEach((el) => el.addEventListener("click", async () => {
-      const toId = parseInt(el.getAttribute("data-id"), 10);
-      try { await API.forwardMessage(State.activeChatId, messageId, toId); window.toast("Переслано", "success"); close(); refreshChatList(); }
-      catch (e) { window.toast(e.message, "error"); }
+    const selected = new Set();
+    const writableChats = State.chats.filter((c) => {
+      if (c.type !== "channel") return true;
+      const me = (c.members || []).find((m) => m.id === State.me.id);
+      return State.me.role === "admin" || !!(me && me.is_chat_admin);
+    });
+    list.innerHTML = writableChats.map((c) => `
+      <label class="user-pick-item" data-id="${c.id}">
+        <input type="checkbox" data-chat="${c.id}" />
+        ${avatarHtml({ url: c.avatar_url, color: c.avatar_color, name: c.name, isGroup: c.type !== "private", isChannel: c.type === "channel", size: "sm" })}
+        <div class="user-pick-name"><div class="un">${escapeHtml(c.name)}</div>${c.type === "channel" ? '<div class="uh">канал</div>' : ""}</div>
+      </label>`).join("") || `<div class="list-empty">Нет доступных чатов</div>`;
+    const sendBtn = document.getElementById("fwd-send");
+    list.querySelectorAll("input[data-chat]").forEach((cb) => cb.addEventListener("change", () => {
+      const cid = parseInt(cb.getAttribute("data-chat"), 10);
+      cb.checked ? selected.add(cid) : selected.delete(cid);
+      sendBtn.disabled = selected.size === 0;
     }));
+    sendBtn.addEventListener("click", async () => {
+      if (!selected.size) return;
+      try {
+        for (const toId of selected) {
+          for (const mid of ids) await API.forwardMessage(State.activeChatId, mid, toId);
+        }
+        window.toast("Переслано", "success"); close(); exitSelectionMode(); refreshChatList();
+      } catch (e) { window.toast(e.message, "error"); }
+    });
   }
+
 
   // ---------- Profile / Settings ----------
   function openProfileModal() {
@@ -1829,6 +3097,73 @@
     });
   }
 
+
+  function openWallpaperModal(draft, onChange) {
+    const old = document.getElementById("wallpaper-popover");
+    if (old) old.remove();
+    const pop = document.createElement("div");
+    pop.id = "wallpaper-popover";
+    pop.className = "wallpaper-popover";
+    pop.innerHTML = `
+      <div class="wp-pop-head"><b>Фон чата</b><button class="modal-close" id="wp-close">✕</button></div>
+      <div class="wp-grid">
+        <button class="wallpaper-chip" data-bg="default"><span class="wp-thumb default"></span><span>Стандарт</span></button>
+        <button class="wallpaper-chip" data-bg="telegram"><span class="wp-thumb telegram"></span><span>Telegram</span></button>
+        <button class="wallpaper-chip" data-bg="blue"><span class="wp-thumb blue"></span><span>Синий</span></button>
+        <button class="wallpaper-chip" data-bg="green"><span class="wp-thumb green"></span><span>Зелёный</span></button>
+        <button class="wallpaper-chip" data-bg="dark"><span class="wp-thumb dark"></span><span>Тёмный</span></button>
+      </div>
+      <div class="wp-custom">
+        <label class="wp-color-line">Свой цвет <input type="color" id="wp-color" value="${escapeAttr(draft.chatBgCustomColor || "#dbeafe")}"></label>
+        <button class="btn-secondary" id="wp-use-color">Применить цвет</button>
+      </div>
+      <div class="wp-custom">
+        <button class="btn-secondary" id="wp-upload">Загрузить картинку</button>
+        <button class="btn-secondary" id="wp-clear-img">Убрать картинку</button>
+        <input type="file" id="wp-file" accept="image/*" style="display:none" />
+      </div>
+      <div class="settings-sub">Картинка хранится локально в браузере. Для стабильной работы берите файл до 1.5 МБ.</div>`;
+    document.body.appendChild(pop);
+    function mark() {
+      pop.querySelectorAll(".wallpaper-chip").forEach((b) => b.classList.toggle("active", b.getAttribute("data-bg") === draft.chatBg));
+    }
+    mark();
+    pop.querySelector("#wp-close").addEventListener("click", () => pop.remove());
+    pop.querySelectorAll(".wallpaper-chip[data-bg]").forEach((b) => b.addEventListener("click", () => {
+      draft.chatBg = b.getAttribute("data-bg"); mark(); onChange();
+    }));
+    pop.querySelector("#wp-use-color").addEventListener("click", () => {
+      draft.chatBg = "customColor";
+      draft.chatBgCustomColor = pop.querySelector("#wp-color").value || "#dbeafe";
+      mark(); onChange();
+    });
+    const fileInput = pop.querySelector("#wp-file");
+    pop.querySelector("#wp-upload").addEventListener("click", () => fileInput.click());
+    pop.querySelector("#wp-clear-img").addEventListener("click", () => {
+      draft.chatBgImage = "";
+      if (draft.chatBg === "customImage") draft.chatBg = "default";
+      mark(); onChange();
+    });
+    fileInput.addEventListener("change", () => {
+      const f = fileInput.files && fileInput.files[0];
+      if (!f) return;
+      if (f.size > 1.5 * 1024 * 1024) { window.toast("Картинка слишком большая для локального хранения (до 1.5 МБ)", "error"); return; }
+      const r = new FileReader();
+      r.onload = () => {
+        draft.chatBgImage = r.result;
+        draft.chatBg = "customImage";
+        mark(); onChange();
+      };
+      r.readAsDataURL(f);
+    });
+    setTimeout(() => {
+      document.addEventListener("click", function once(e) {
+        if (pop.contains(e.target) || (e.target && e.target.id === "set-wallpaper-open")) return;
+        pop.remove(); document.removeEventListener("click", once);
+      });
+    }, 0);
+  }
+
   function openSettingsModal() {
     const overlay = document.getElementById("modal-overlay");
     const isDark = document.documentElement.getAttribute("data-theme") === "dark";
@@ -1843,6 +3178,10 @@
             <label class="switch"><input type="checkbox" id="set-keeptray" ${p.keepInTray ? "checked" : ""} ${ISDESKTOP ? "" : "disabled"}><span class="slider"></span></label></div>
           <div class="settings-row"><div><div class="settings-label">Автоматический запуск при старте</div><div class="settings-sub">Запускать при входе в Windows</div></div>
             <label class="switch"><input type="checkbox" id="set-autostart" ${p.autostart ? "checked" : ""} ${ISDESKTOP ? "" : "disabled"}><span class="slider"></span></label></div>
+          <div class="settings-row"><div><div class="settings-label">Обновить веб-интерфейс</div><div class="settings-sub">Очистить кэш Electron и загрузить свежую версию с сервера</div></div>
+            <button type="button" class="btn-secondary" id="desktop-hard-reload" ${ISDESKTOP ? "" : "disabled"}>Обновить</button></div>
+          <div class="settings-row"><div><div class="settings-label">Сменить сервер</div><div class="settings-sub">Открыть настройку адреса сервера desktop-приложения</div></div>
+            <button type="button" class="btn-secondary" id="desktop-change-server" ${ISDESKTOP ? "" : "disabled"}>Сменить</button></div>
           <div class="settings-row"><div><div class="settings-label">Статус «Нет на месте» при бездействии</div><div class="settings-sub">Через 15 минут без активности</div></div>
             <label class="switch"><input type="checkbox" id="set-away" ${p.awayOnIdle ? "checked" : ""}><span class="slider"></span></label></div>
 
@@ -1862,8 +3201,31 @@
           <div class="settings-group-title">Оформление</div>
           <div class="settings-row"><div><div class="settings-label">Тёмная тема</div><div class="settings-sub">Ночной режим</div></div>
             <label class="switch"><input type="checkbox" id="set-dark" ${isDark ? "checked" : ""}><span class="slider"></span></label></div>
+          <div class="settings-row wallpaper-row">
+            <div>
+              <div class="settings-label">Фон за сообщениями</div>
+              <div class="settings-sub">Обои чата, как в Telegram. Сохраняется на этом устройстве.</div>
+            </div>
+            <button type="button" class="btn-secondary" id="set-wallpaper-open">Выбрать</button>
+          </div>
+          <div class="wallpaper-preview-strip" id="wallpaper-preview-strip">
+            <button type="button" class="wallpaper-chip" data-bg="default"><span class="wp-thumb default"></span><span>Стандарт</span></button>
+            <button type="button" class="wallpaper-chip" data-bg="telegram"><span class="wp-thumb telegram"></span><span>Telegram</span></button>
+            <button type="button" class="wallpaper-chip" data-bg="blue"><span class="wp-thumb blue"></span><span>Синий</span></button>
+            <button type="button" class="wallpaper-chip" data-bg="green"><span class="wp-thumb green"></span><span>Зелёный</span></button>
+            <button type="button" class="wallpaper-chip" data-bg="dark"><span class="wp-thumb dark"></span><span>Тёмный</span></button>
+          </div>
           <div class="settings-row"><div><div class="settings-label">Цвет аватара</div><div class="settings-sub">Ваш цвет в кружочке</div></div>
             <input type="color" id="set-color" value="${escapeAttr(State.me.avatar_color)}" style="width:44px;height:32px;border:none;background:none"></div>
+          <div class="settings-row">
+            <div><div class="settings-label">Шрифт интерфейса</div><div class="settings-sub">Единый вид в Edge, Chrome, Firefox и Safari</div></div>
+            <select id="set-font-family" class="set-select">
+              <option value="segoe" ${p.fontFamily === "segoe" ? "selected" : ""}>Segoe UI — как в Edge</option>
+              <option value="system" ${p.fontFamily === "system" ? "selected" : ""}>Системный</option>
+              <option value="inter" ${p.fontFamily === "inter" ? "selected" : ""}>Inter-подобный</option>
+              <option value="roboto" ${p.fontFamily === "roboto" ? "selected" : ""}>Roboto-подобный</option>
+            </select>
+          </div>
           <div class="settings-row fs-row">
             <div>
               <div class="settings-label">Размер сообщений</div>
@@ -1943,15 +3305,18 @@
       if (b) { b.disabled = false; b.textContent = "Сохранить"; }
     }
     function previewApply() {
+      document.documentElement.style.setProperty("--app-font", fontStack(draft.fontFamily));
       document.documentElement.style.setProperty("--msg-font-size", draft.fontSize + "px");
       document.body.classList.toggle("compact-mode", !!draft.compact);
       document.body.classList.toggle("bubbles-square", draft.bubbleStyle === "square");
       document.body.classList.toggle("hide-right-sidebar", !draft.showSidebar);
       document.documentElement.setAttribute("data-theme", draftTheme);
+      applyChatBackground(draft);
     }
     function revertPreview() {
       applyPrefs();
       document.documentElement.setAttribute("data-theme", savedTheme);
+      applyChatBackground(saved);
     }
     async function commit() {
       Object.keys(draft).forEach((k) => Prefs.set(k, draft[k]));
@@ -2004,16 +3369,42 @@
       }).catch(() => {});
     }
 
+    const hardReloadBtn = document.getElementById("desktop-hard-reload");
+    if (hardReloadBtn) hardReloadBtn.addEventListener("click", async () => {
+      if (DESKTOP && DESKTOP.hardReload) { try { await DESKTOP.hardReload(); } catch (e) {} }
+    });
+    const changeServerBtn = document.getElementById("desktop-change-server");
+    if (changeServerBtn) changeServerBtn.addEventListener("click", async () => {
+      if (DESKTOP && DESKTOP.changeServer) { try { await DESKTOP.changeServer(); } catch (e) {} }
+    });
+
     // ---- Подключение ----
     fillConnectionPanel();
     onAppPref("set-autologin", "autoLogin");
     onAppPref("set-sso", "preferSSO");
     onAppPref("set-noproxy", "noProxy");
 
+    document.getElementById("set-font-family").addEventListener("change", (e) => {
+      draft.fontFamily = e.target.value || "segoe";
+      previewApply(); markDirty();
+    });
     document.getElementById("set-dark").addEventListener("change", (e) => {
       draftTheme = e.target.checked ? "dark" : "light";
       previewApply(); markDirty();
     });
+
+    function refreshWallpaperChips() {
+      document.querySelectorAll(".wallpaper-chip").forEach((b) =>
+        b.classList.toggle("active", b.getAttribute("data-bg") === draft.chatBg));
+    }
+    document.querySelectorAll(".wallpaper-chip[data-bg]").forEach((b) => b.addEventListener("click", () => {
+      draft.chatBg = b.getAttribute("data-bg");
+      previewApply(); refreshWallpaperChips(); markDirty();
+    }));
+    refreshWallpaperChips();
+    const wpOpen = document.getElementById("set-wallpaper-open");
+    if (wpOpen) wpOpen.addEventListener("click", () => openWallpaperModal(draft, () => { previewApply(); refreshWallpaperChips(); markDirty(); }));
+
     document.getElementById("set-color").addEventListener("change", async (e) => {
       // avatar color is an account setting -> saved immediately via API
       try { const u = await API.updateMe({ avatar_color: e.target.value }); API.Store.setUser(u); State.me = u; window.toast("Цвет обновлён", "success"); renderLayout(); loadChats(); }
@@ -2067,8 +3458,8 @@
     });
     document.getElementById("open-changepw").addEventListener("click", () => { close(); openChangePasswordModal(); });
     document.getElementById("open-shortcuts").addEventListener("click", () => { close(); openShortcutsModal(); });
-    document.getElementById("clear-cache").addEventListener("click", () => {
-      if (!confirm("Сбросить настройки и кэш на этом устройстве? Вы останетесь в аккаунте.")) return;
+    document.getElementById("clear-cache").addEventListener("click", async () => {
+      if (!(await uiConfirm("Сбросить настройки и кэш на этом устройстве? Вы останетесь в аккаунте."))) return;
       const token = API.Store.getToken(), user = localStorage.getItem("cc_user");
       localStorage.clear();
       if (token) localStorage.setItem("cc_token", token);
@@ -2163,35 +3554,37 @@
     const overlay = document.getElementById("modal-overlay");
     const amAdmin = isMyGroupAdmin();
     const isGroup = chat.type !== "private";
+    const isChannel = chat.type === "channel";
+    const unit = isChannel ? "подписч." : "участн.";
     overlay.innerHTML = `
       <div class="modal">
-        <div class="modal-header"><h2>${isGroup ? "О группе" : "О чате"}</h2><button class="modal-close">✕</button></div>
+        <div class="modal-header"><h2>${isChannel ? "О канале" : (isGroup ? "О группе" : "О чате")}</h2><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <div style="text-align:center;margin-bottom:16px">
             <div class="avatar-edit ${isGroup && amAdmin ? "" : "no-edit"}" id="ci-avatar-wrap" style="margin:0 auto 10px">
-              ${avatarHtml({ url: chat.avatar_url, color: chat.avatar_color, name: chat.name, isGroup, size: "lg" })}
+              ${avatarHtml({ url: chat.avatar_url, color: chat.avatar_color, name: chat.name, isGroup, isChannel, size: "lg" })}
               ${isGroup && amAdmin ? '<div class="avatar-edit-overlay">📷</div>' : ""}
             </div>
             ${isGroup && amAdmin ? '<input type="file" id="ci-avatar-input" accept="image/*" style="display:none" />' : ""}
             <div style="font-size:18px;font-weight:600" id="ci-name">${escapeHtml(chat.name)}</div>
-            <div class="settings-sub">${isGroup ? "Группа" : "Личный чат"} · ${chat.members.length} участн.</div>
+            <div class="settings-sub">${isChannel ? "Канал" : (isGroup ? "Группа" : "Личный чат")} · ${chat.members.length} ${unit}</div>
             ${chat.description ? `<div style="margin-top:8px;color:var(--text-secondary)">${escapeHtml(chat.description)}</div>` : ""}
           </div>
           ${isGroup && amAdmin ? `
             <div class="field"><label>Название</label><input type="text" id="ci-edit-name" value="${escapeAttr(chat.name)}" /></div>
             <div class="field"><label>Описание</label><input type="text" id="ci-edit-desc" value="${escapeAttr(chat.description || "")}" placeholder="Описание группы" /></div>
             <button class="btn-primary inline" id="ci-save" style="margin-bottom:14px">Сохранить изменения</button>
-            <button class="btn-secondary" id="ci-add" style="margin-bottom:14px">➕ Добавить участников</button>
+            <button class="btn-secondary" id="ci-add" style="margin-bottom:14px">➕ ${isChannel ? "Добавить подписчиков" : "Добавить участников"}</button>
           ` : ""}
           <div class="settings-row" style="padding:8px 0">
             <div class="settings-label">${chat.is_muted ? "🔇 Уведомления выключены" : "🔔 Уведомления включены"}</div>
             <label class="switch"><input type="checkbox" id="ci-mute" ${chat.is_muted ? "" : "checked"}><span class="slider"></span></label>
           </div>
-          <div class="list-section-title">Участники</div>
+          <div class="list-section-title">${isChannel ? "Подписчики" : "Участники"}</div>
           <div id="ci-members"></div>
         </div>
         <div class="modal-footer">
-          ${isGroup ? `<button class="btn-danger" id="ci-leave">Покинуть группу</button>` : ""}
+          ${isGroup ? `<button class="btn-danger" id="ci-leave">${isChannel ? "Покинуть канал" : "Покинуть группу"}</button>` : ""}
           ${(!isGroup || amAdmin) ? `<button class="btn-danger" id="ci-delete">Удалить чат</button>` : ""}
           <button class="btn-secondary" id="modal-cancel">Закрыть</button>
         </div>
@@ -2220,7 +3613,7 @@
         const id = parseInt(b.getAttribute("data-id"), 10), act = b.getAttribute("data-mact");
         try {
           if (act === "admin") { await API.toggleMemberAdmin(chat.id, id); window.toast("Готово", "success"); }
-          else if (act === "remove") { if (!confirm("Удалить участника?")) return; await API.removeMember(chat.id, id); window.toast("Удалён", "success"); }
+          else if (act === "remove") { if (!(await uiConfirm("Удалить участника?"))) return; await API.removeMember(chat.id, id); window.toast("Удалён", "success"); }
           await reloadActiveChat(); close(); openChatInfo();
         } catch (e) { window.toast(e.message, "error"); }
       }));
@@ -2260,13 +3653,13 @@
     if (addBtn) addBtn.addEventListener("click", () => { close(); openAddMembersModal(chat.id); });
     const leaveBtn = document.getElementById("ci-leave");
     if (leaveBtn) leaveBtn.addEventListener("click", async () => {
-      if (!confirm("Покинуть группу?")) return;
+      if (!(await uiConfirm(isChannel ? "Покинуть канал?" : "Покинуть группу?"))) return;
       try { await API.removeMember(chat.id, State.me.id); window.toast("Вы покинули группу"); close(); State.activeChatId = null; Router.navigate("/chats"); loadChats(); }
       catch (e) { window.toast(e.message, "error"); }
     });
     const delBtn = document.getElementById("ci-delete");
     if (delBtn) delBtn.addEventListener("click", async () => {
-      if (!confirm("Удалить чат? Это действие необратимо.")) return;
+      if (!(await uiConfirm("Удалить чат? Это действие необратимо."))) return;
       try { await API.deleteChat(chat.id); window.toast("Чат удалён"); close(); State.activeChatId = null; Router.navigate("/chats"); loadChats(); }
       catch (e) { window.toast(e.message, "error"); }
     });
@@ -2276,8 +3669,8 @@
     const overlay = document.getElementById("modal-overlay");
     overlay.innerHTML = `
       <div class="modal">
-        <div class="modal-header"><h2>Добавить участников</h2><button class="modal-close">✕</button></div>
-        <div class="modal-body"><div class="field"><input type="text" id="am-search" placeholder="Поиск..." /></div><div id="am-list"></div></div>
+        <div class="modal-header"><h2>${State.activeChat && State.activeChat.type === "channel" ? "Добавить подписчиков" : "Добавить участников"}</h2><button class="modal-close">✕</button></div>
+        <div class="modal-body"><div class="field"><input type="text" id="am-search" placeholder="Поиск пользователей..." /></div><div id="am-list"></div></div>
         <div class="modal-footer"><button class="btn-secondary" id="modal-cancel">Отмена</button><button class="btn-primary inline" id="am-add" disabled>Добавить</button></div>
       </div>`;
     overlay.classList.add("show");
@@ -2328,7 +3721,7 @@
     if (url) {
       return `<img class="avatar-img" src="${escapeAttr(url)}" alt="" loading="lazy" />${extra}`;
     }
-    const label = opts.isGroup ? "👥" : initials(opts.name);
+    const label = opts.isChannel ? icon("channel", "avatar-material-icon") : (opts.isGroup ? icon("users", "avatar-material-icon") : initials(opts.name));
     return `${label}${extra}`;
   }
   // Build a full avatar element. size: "" | "sm" | "lg"
@@ -2349,31 +3742,26 @@
     while (num >= 1024 && i < units.length - 1) { num /= 1024; i++; }
     return (i === 0 ? num.toFixed(0) : num.toFixed(1)) + " " + units[i];
   }
-  // Open a file inline when possible (image/pdf/text/video/audio shown in an
-  // in-app viewer), otherwise open in a new tab or download.
+  // Open a file inline when possible (image/pdf/docx/xlsx/text/video/audio
+  // shown in an in-app viewer), otherwise open in a new tab or download.
   function openOrDownloadFile(url, name, canOpen) {
     const ext = (name || "").split(".").pop().toLowerCase();
     const isImg = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"].indexOf(ext) >= 0;
-    const isPdf = ext === "pdf";
-    const isVideo = ["mp4", "webm", "ogg"].indexOf(ext) >= 0;
-    const isAudio = ["mp3", "wav", "m4a", "ogg"].indexOf(ext) >= 0;
-    const isText = ["txt", "log", "csv", "json", "xml", "md", "html", "htm"].indexOf(ext) >= 0;
-
+    const isPreviewable = ["pdf", "docx", "xlsx", "xlsm", "txt", "log", "csv", "json", "xml", "md", "html", "htm", "mp4", "webm", "ogg", "mp3", "wav", "m4a"].indexOf(ext) >= 0;
     if (isImg) { openLightbox(url, name); return; }
-    if (isPdf || isVideo || isAudio || isText) { openDocViewer(url, name, ext); return; }
-    if (canOpen) { window.open(url, "_blank", "noopener"); return; }
-    // fall back to a download
+    if (isPreviewable) { openDocViewer(url, name, ext); return; }
+    if (canOpen) { API.logDownload(url, name, "open").catch(() => {}); window.open(url, "_blank", "noopener"); return; }
     triggerDownload(url, name);
   }
 
   function triggerDownload(url, name) {
+    API.logDownload(url, name, "download").catch(() => {});
     const a = document.createElement("a");
     a.href = url; a.download = name || ""; a.rel = "noopener";
     document.body.appendChild(a); a.click(); a.remove();
   }
 
-  // Full-screen document viewer for PDF / video / audio / text files.
-  function openDocViewer(url, name, ext) {
+  function docViewerShell(url, name) {
     let dv = document.getElementById("doc-viewer");
     if (!dv) {
       dv = document.createElement("div");
@@ -2381,41 +3769,91 @@
       dv.className = "doc-viewer";
       document.body.appendChild(dv);
     }
-    let inner;
-    if (ext === "pdf") {
-      inner = `<iframe class="dv-frame" src="${escapeAttr(url)}#toolbar=1" title="${escapeAttr(name)}"></iframe>`;
-    } else if (["mp4", "webm"].indexOf(ext) >= 0) {
-      inner = `<video class="dv-media" src="${escapeAttr(url)}" controls autoplay></video>`;
-    } else if (["mp3", "wav", "m4a", "ogg"].indexOf(ext) >= 0) {
-      inner = `<div class="dv-audio"><div class="dv-audio-name">🎵 ${escapeHtml(name)}</div><audio src="${escapeAttr(url)}" controls autoplay></audio></div>`;
-    } else {
-      // text-like: fetch and show as preformatted text (safe, escaped)
-      inner = `<pre class="dv-text" id="dv-text">Загрузка…</pre>`;
-    }
     dv.innerHTML = `
       <div class="dv-bar">
         <div class="dv-title">${escapeHtml(name)}</div>
         <div class="dv-tools">
+          <button class="dv-btn" id="dv-history" title="История просмотров/скачиваний">🕘</button>
           <a class="dv-btn" href="${escapeAttr(url)}" target="_blank" rel="noopener" title="Открыть в новой вкладке">↗</a>
           <a class="dv-btn" href="${escapeAttr(url)}" download="${escapeAttr(name)}" title="Скачать">⬇</a>
           <button class="dv-btn dv-close" title="Закрыть">✕</button>
         </div>
       </div>
-      <div class="dv-body">${inner}</div>`;
+      <div class="dv-warnings" id="dv-warnings"></div>
+      <div class="dv-body" id="dv-body"><div class="doc-loading">Загрузка предпросмотра…</div></div>`;
     dv.classList.add("show");
     const close = () => { dv.classList.remove("show"); dv.innerHTML = ""; };
     dv.querySelector(".dv-close").addEventListener("click", close);
+    dv.querySelector("a[download]").addEventListener("click", () => API.logDownload(url, name, "download").catch(() => {}));
+    dv.querySelector("a[target]").addEventListener("click", () => API.logDownload(url, name, "open").catch(() => {}));
+    dv.querySelector("#dv-history").addEventListener("click", () => showDownloadHistory(url));
     dv.addEventListener("click", (e) => { if (e.target === dv) close(); });
     document.addEventListener("keydown", function esc(e) {
       if (e.key === "Escape") { close(); document.removeEventListener("keydown", esc); }
     });
-    // load text content (escaped) for text-like files
-    const pre = document.getElementById("dv-text");
-    if (pre) {
-      fetch(url).then((r) => r.text()).then((txt) => {
-        pre.textContent = txt.slice(0, 500000); // cap to ~500KB for safety
-      }).catch(() => { pre.textContent = "Не удалось загрузить файл."; });
+    return dv;
+  }
+
+  // Full-screen document viewer for PDF / Office / video / audio / text files.
+  async function openDocViewer(url, name, ext) {
+    const dv = docViewerShell(url, name);
+    const body = dv.querySelector("#dv-body");
+    const warns = dv.querySelector("#dv-warnings");
+    try {
+      if (["mp4", "webm"].indexOf(ext) >= 0) {
+        API.logDownload(url, name, "preview").catch(() => {});
+        body.innerHTML = `<video class="dv-media" src="${escapeAttr(url)}" controls autoplay></video>`;
+        return;
+      }
+      if (["mp3", "wav", "m4a", "ogg"].indexOf(ext) >= 0) {
+        API.logDownload(url, name, "preview").catch(() => {});
+        body.innerHTML = `<div class="dv-audio"><div class="dv-audio-name">🎵 ${escapeHtml(name)}</div><audio src="${escapeAttr(url)}" controls autoplay></audio></div>`;
+        return;
+      }
+
+      const res = await API.previewDocument(url, name);
+      if (res.warnings && res.warnings.length) {
+        warns.innerHTML = res.warnings.map((w) => `<div>⚠️ ${escapeHtml(w)}</div>`).join("");
+      }
+      if (res.kind === "pdf") {
+        body.innerHTML = `<iframe class="dv-frame" src="${escapeAttr(url)}#toolbar=1" title="${escapeAttr(name)}"></iframe>`;
+      } else if (res.kind === "image") {
+        body.innerHTML = `<img class="dv-image" src="${escapeAttr(url)}" alt="${escapeAttr(name)}" />`;
+      } else if (res.kind === "html") {
+        body.innerHTML = `<div class="dv-html">${res.html || ""}</div>`;
+      } else {
+        body.innerHTML = `<div class="doc-unsupported"><div>Предпросмотр недоступен для этого типа файла.</div><button class="btn-secondary" id="dv-download-fallback">Скачать файл</button></div>`;
+        const b = document.getElementById("dv-download-fallback");
+        if (b) b.addEventListener("click", () => triggerDownload(url, name));
+      }
+    } catch (e) {
+      body.innerHTML = `<div class="doc-unsupported">${escapeHtml(e.message || "Не удалось открыть предпросмотр")}</div>`;
     }
+  }
+
+  async function showDownloadHistory(url) {
+    const body = document.getElementById("dv-body");
+    if (!body) return;
+    body.innerHTML = `<div class="doc-loading">Загрузка истории…</div>`;
+    try {
+      const rows = await API.downloadHistory(url, 80);
+      if (!rows.length) { body.innerHTML = `<div class="list-empty">История пуста</div>`; return; }
+      body.innerHTML = `<div class="download-history"><h3>История просмотров и скачиваний</h3>${rows.map((r) => `
+        <div class="dh-row">
+          <span class="badge user">${escapeHtml(actionLabel(r.action))}</span>
+          <b>${escapeHtml(r.username || (r.user_id ? "#" + r.user_id : "—"))}</b>
+          <span>${new Date(r.created_at).toLocaleString("ru-RU")}</span>
+        </div>`).join("")}</div>`;
+    } catch (e) { body.innerHTML = `<div class="doc-unsupported">${escapeHtml(e.message)}</div>`; }
+  }
+
+  function actionLabel(a) {
+    return a === "preview" ? "просмотр" : (a === "open" ? "открытие" : "скачивание");
+  }
+
+  function galleryImages() {
+    return (State.messages || []).filter((m) => !m.is_deleted && m.attachment_kind === "image" && m.attachment_url)
+      .map((m) => ({ url: m.attachment_url, thumb: m.attachment_thumb || m.attachment_url, name: m.attachment_name || "Фото" }));
   }
 
   function openLightbox(url, name) {
@@ -2426,18 +3864,35 @@
       lb.className = "lightbox";
       document.body.appendChild(lb);
     }
-    lb.innerHTML = `
-      <button class="lb-close" title="Закрыть">✕</button>
-      <a class="lb-download" href="${escapeAttr(url)}" download="${escapeAttr(name || "")}" target="_blank" rel="noopener" title="Скачать">⬇</a>
-      <img src="${escapeAttr(url)}" alt="${escapeAttr(name || "")}" />`;
+    const images = galleryImages();
+    let idx = Math.max(0, images.findIndex((x) => x.url === url));
+    if (idx < 0) { images.push({ url, name: name || "" }); idx = images.length - 1; }
+    function render() {
+      const cur = images[idx] || { url, name };
+      lb.innerHTML = `
+        <button class="lb-close" title="Закрыть">✕</button>
+        <a class="lb-download" href="${escapeAttr(cur.url)}" download="${escapeAttr(cur.name || "")}" target="_blank" rel="noopener" title="Скачать">⬇</a>
+        ${images.length > 1 ? `<button class="lb-nav prev" title="Назад">‹</button><button class="lb-nav next" title="Вперёд">›</button><div class="lb-counter">${idx + 1} / ${images.length}</div>` : ""}
+        <img src="${escapeAttr(cur.url)}" alt="${escapeAttr(cur.name || "")}" />`;
+      lb.querySelector(".lb-close").addEventListener("click", close);
+      lb.querySelector(".lb-download").addEventListener("click", () => API.logDownload(cur.url, cur.name || "", "download").catch(() => {}));
+      const prev = lb.querySelector(".lb-nav.prev"), next = lb.querySelector(".lb-nav.next");
+      if (prev) prev.addEventListener("click", (e) => { e.stopPropagation(); idx = (idx - 1 + images.length) % images.length; render(); });
+      if (next) next.addEventListener("click", (e) => { e.stopPropagation(); idx = (idx + 1) % images.length; render(); });
+      API.logDownload(cur.url, cur.name || "", "preview").catch(() => {});
+    }
     lb.classList.add("show");
     const close = () => lb.classList.remove("show");
-    lb.querySelector(".lb-close").addEventListener("click", close);
-    lb.addEventListener("click", (e) => { if (e.target === lb) close(); });
+    lb.onclick = (e) => { if (e.target === lb) close(); };
     document.addEventListener("keydown", function esc(e) {
+      if (!lb.classList.contains("show")) { document.removeEventListener("keydown", esc); return; }
       if (e.key === "Escape") { close(); document.removeEventListener("keydown", esc); }
+      if (e.key === "ArrowLeft" && images.length > 1) { idx = (idx - 1 + images.length) % images.length; render(); }
+      if (e.key === "ArrowRight" && images.length > 1) { idx = (idx + 1) % images.length; render(); }
     });
+    render();
   }
+
   // Detect messages that are purely emoji (1-6 of them) -> render jumbo.
   function emojiOnlyClass(text) {
     const t = (text || "").trim();
@@ -2486,9 +3941,9 @@
   }
 
   window.ChatView = {
-    mount: async function () { renderLayout(); applyPrefs(); connectWS(); setupIdleWatcher(); bindFocusClear(); loadPermissions(); await loadChats(); },
+    mount: async function () { renderLayout(); applyPrefs(); connectWS(); setupIdleWatcher(); bindFocusClear(); loadPermissions(); loadMissedCallsUnread(); await loadChats(); if ((location.hash || "").indexOf("calls=1") >= 0) setTimeout(openCallsModal, 200); },
     openChat: async function (chatId) {
-      if (!document.getElementById("app-layout")) { renderLayout(); connectWS(); await loadChats(); }
+      if (!document.getElementById("app-layout")) { renderLayout(); connectWS(); loadMissedCallsUnread(); await loadChats(); if ((location.hash || "").indexOf("calls=1") >= 0) setTimeout(openCallsModal, 200); }
       await openChat(chatId);
     },
     ensureConnected: connectWS,
