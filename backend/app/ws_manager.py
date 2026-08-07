@@ -9,12 +9,12 @@ class ConnectionManager:
     def __init__(self) -> None:
         # user_id -> set of websockets (multiple tabs/devices)
         self._connections: dict[int, set[WebSocket]] = defaultdict(set)
-        # user_id -> presence status: "online" | "away" (transient, in-memory)
+        # user_id -> presence status: "online" | "away" | "dnd" (transient, in-memory)
         self._status: dict[int, str] = {}
         self._lock = asyncio.Lock()
 
     def set_status(self, user_id: int, status: str) -> None:
-        if status not in ("online", "away"):
+        if status not in ("online", "away", "dnd"):
             status = "online"
         self._status[user_id] = status
 

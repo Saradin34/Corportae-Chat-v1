@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Corporate Chat",
+  "version": "2.0.0",
+  "identifier": "by.kupava.corporate-chat",
+  "build": {
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "devUrl": "https://chat.kupava.by",
+    "frontendDist": "../public"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Corporate Chat",
+        "url": "https://chat.kupava.by",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 360,
+        "minHeight": 560,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "visible": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "category": "Business",
+    "shortDescription": "Corporate Chat",
+    "longDescription": "Corporate Chat lightweight desktop app based on Microsoft WebView2.",
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "installMode": "currentUser",
+        "displayLanguageSelector": false
+      }
+    }
+  }
+}

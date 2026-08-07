@@ -1,0 +1,19 @@
+{
+  "name": "Corporate Chat",
+  "short_name": "CorpChat",
+  "description": "Corporate Chat mobile web app",
+  "start_url": "/#/chats",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#17212b",
+  "theme_color": "#3390ec",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='42' fill='%233390ec'/%3E%3Ctext x='96' y='126' font-size='104' text-anchor='middle' fill='white' font-family='Arial,sans-serif' font-weight='700'%3EC%3C/text%3E%3C/svg%3E",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

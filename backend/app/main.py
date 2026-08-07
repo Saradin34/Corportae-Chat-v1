@@ -10,7 +10,7 @@ from sqlalchemy import select
 from .config import settings
 from .database import async_session_maker, init_db
 from .models import User
-from .routers import admin, auth, chats, groups, messages, settings as settings_router, uploads, users, ws
+from .routers import admin, auth, calendar, calls, chats, groups, messages, settings as settings_router, support, uploads, users, ws
 from .security import hash_password
 from .utils import random_color
 
@@ -65,6 +65,12 @@ async def lifespan(app: FastAPI):
         await init_db()
         await _ensure_admin()
         await _ensure_default_group()
+        # Optional Asterisk AMI listener for incoming/missed call notifications.
+        app.state.ami_stop = asyncio.Event()
+        app.state.ami_task = None
+        if settings.AMI_ENABLED:
+            from .ami import ami_listener
+            app.state.ami_task = asyncio.create_task(ami_listener(app.state.ami_stop))
         logger.info("Startup complete")
     except Exception:
         # Log the FULL traceback so the real cause is visible in
@@ -72,6 +78,13 @@ async def lifespan(app: FastAPI):
         logger.exception("FATAL: startup failed")
         raise
     yield
+    try:
+        if getattr(app.state, "ami_stop", None):
+            app.state.ami_stop.set()
+        if getattr(app.state, "ami_task", None):
+            app.state.ami_task.cancel()
+    except Exception:
+        pass
     logger.info("Shutdown")
 
 
@@ -105,6 +118,9 @@ app.include_router(admin.router)
 app.include_router(groups.router)
 app.include_router(settings_router.router)
 app.include_router(uploads.router)
+app.include_router(calls.router)
+app.include_router(calendar.router)
+app.include_router(support.router)
 app.include_router(ws.router)
 
 

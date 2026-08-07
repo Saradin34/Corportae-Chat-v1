@@ -1,0 +1,19 @@
+[package]
+name = "corporate-chat-tauri"
+version = "2.0.0"
+description = "Corporate Chat lightweight desktop app"
+authors = ["Corporate Chat"]
+edition = "2021"
+
+[lib]
+name = "corporate_chat_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-ico", "image-png"] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
