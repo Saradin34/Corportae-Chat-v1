@@ -110,6 +110,13 @@ def _run_light_migrations(connection) -> None:
             "is_muted": "BOOLEAN DEFAULT FALSE",
             "last_read_message_id": "INTEGER DEFAULT 0",
         },
+        "calendar_notes": {
+            "calendar_id": "INTEGER",
+        },
+        "support_tickets": {
+            "category": "VARCHAR(32) DEFAULT 'general'",
+            "assigned_admin_id": "INTEGER",
+        },
         "messages": {
             "forwarded_from_name": "VARCHAR(128) DEFAULT ''",
             "is_pinned": "BOOLEAN DEFAULT FALSE",
@@ -121,6 +128,7 @@ def _run_light_migrations(connection) -> None:
             "attachment_size": "INTEGER DEFAULT 0",
             "attachment_w": "INTEGER DEFAULT 0",
             "attachment_h": "INTEGER DEFAULT 0",
+            "importance": "VARCHAR(16) DEFAULT 'normal'",
         },
     }
 
@@ -143,6 +151,23 @@ def _run_light_migrations(connection) -> None:
         "ix_messages_chat_id_id": "messages (chat_id, id)",
         "ix_users_group_id": "users (group_id)",
         "ix_reactions_message_id": "reactions (message_id)",
+        "ix_download_events_file_url": "download_events (file_url)",
+        "ix_download_events_user_id": "download_events (user_id)",
+        "ix_call_events_user_id": "call_events (user_id)",
+        "ix_call_events_extension": "call_events (extension)",
+        "ix_call_events_linked_id": "call_events (linked_id)",
+        "ix_calendar_notes_user_id": "calendar_notes (user_id)",
+        "ix_calendar_notes_user_id_starts_at": "calendar_notes (user_id, starts_at)",
+        "ix_calendar_notes_calendar_id": "calendar_notes (calendar_id)",
+        "ix_calendars_owner_id": "calendars (owner_id)",
+        "ix_calendar_members_user_id": "calendar_members (user_id)",
+        "ix_calendar_members_calendar_id": "calendar_members (calendar_id)",
+        "ix_support_tickets_user_id": "support_tickets (user_id)",
+        "ix_support_tickets_status": "support_tickets (status)",
+        "ix_support_messages_ticket_id": "support_messages (ticket_id)",
+        "ix_support_tickets_category": "support_tickets (category)",
+        "ix_support_tickets_assigned_admin_id": "support_tickets (assigned_admin_id)",
+        "ix_support_templates_category": "support_templates (category)",
     }
     for name, target in indexes.items():
         table = target.split(" ", 1)[0]

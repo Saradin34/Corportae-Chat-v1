@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     LDAP_NETBIOS: str = ""
     # Attribute used as the login name (sAMAccountName for AD).
     LDAP_LOGIN_ATTR: str = "sAMAccountName"
+    # Optional bind mechanism override. Leave empty for the normal AD flow:
+    # SIMPLE for user@domain and NTLM for DOMAIN\\user. Set to NEGOTIATE only
+    # when Kerberos/GSSAPI is deliberately configured in the container.
+    LDAP_AUTH_MECHANISM: str = ""
     # Service account for searching the directory (group membership, profile).
     # Leave empty to use the just-authenticated user's own credentials.
     LDAP_BIND_DN: str = ""
@@ -63,11 +67,86 @@ class Settings(BaseSettings):
     # When True, each AD user's group memberships are mirrored into the app as
     # group chats on login (the user is auto-added to the matching app group).
     LDAP_SYNC_GROUPS: bool = True
+    # Optional separate base DN for AD group search/import. Empty = search LDAP_BASE_DN and domain root fallback.
+    LDAP_GROUP_BASE_DN: str = ""
     # Only mirror groups whose DN contains one of these comma-separated
     # substrings (e.g. "OU=Departments"). Empty = mirror all memberOf groups.
     LDAP_GROUP_FILTER: str = ""
     # Ignore well-known builtin AD groups that aren't useful as chats.
     LDAP_GROUP_EXCLUDE: str = "Domain Users,Domain Computers,Domain Guests"
+    # ---------- Call control ----------
+    # ami = Asterisk callback Originate;
+    # ip_phone/phone/http = ask the user's physical IP phone to dial directly;
+    # fanvil is kept as a legacy alias for ip_phone;
+    # auto = try direct IP-phone HTTP control first, then AMI fallback.
+    CALL_CONTROL_MODE: str = "ami"  # ami | ip_phone | phone | http | fanvil | auto
+
+    # ---------- Yeastar P-Series OpenAPI call control ----------
+    # This is the preferred PBX-side direct click-to-call for Yeastar P-Series.
+    # It calls /openapi/v1.0/call/dial with auto_answer=yes so the caller's
+    # phone should open the call without the old manual callback-answer step
+    # when the endpoint supports auto-answer.
+    YEASTAR_ENABLED: bool = False
+    YEASTAR_BASE_URL: str = "https://192.168.30.1:8088"
+    YEASTAR_API_PATH: str = "openapi/v1.0"
+    YEASTAR_USERNAME: str = ""
+    YEASTAR_PASSWORD: str = ""
+    YEASTAR_VERIFY_SSL: bool = False
+    YEASTAR_TIMEOUT: float = 8.0
+    YEASTAR_AUTO_ANSWER: str = "yes"
+    YEASTAR_DIAL_PERMISSION: str = ""
+
+    # ---------- Generic IP-phone HTTP control ----------
+    # Works with Fanvil and also with other IP phones if the phone supports an
+    # HTTP dial/action URL. Configure the proper URL template for each model.
+    PHONE_CONTROL_ENABLED: bool = False
+    PHONE_CONTROL_USERNAME: str = ""
+    PHONE_CONTROL_PASSWORD: str = ""
+    PHONE_CONTROL_TIMEOUT: float = 4.0
+    # JSON or CSV map: {"219":"192.168.30.49"} or "219=192.168.30.49,204=192.168.30.50"
+    PHONE_CONTROL_MAP: str = ""
+    # Template supports: {scheme}, {ip}, {from_ext}, {to}, {to_ext}. Multiple templates can be separated by ;
+    PHONE_CONTROL_SCHEME: str = "http"
+    PHONE_CONTROL_DIAL_URL_TEMPLATE: str = "{scheme}://{ip}/cgi-bin/ConfigManApp.com?key={to}"
+    PHONE_CONTROL_FALLBACK_AMI: bool = True
+    # Optional AD lookup for phone IPs. If PHONE_CONTROL_MAP has no entry for
+    # the caller extension, backend can search AD and read the IP from a chosen
+    # attribute. This works only if AD really contains the physical phone IP.
+    PHONE_CONTROL_AD_ENABLED: bool = False
+    PHONE_CONTROL_AD_EXTENSION_ATTRS: str = "telephoneNumber,ipPhone,otherTelephone"
+    PHONE_CONTROL_AD_IP_ATTRS: str = "ipPhone,networkAddress,description,info,extensionAttribute1,extensionAttribute2,extensionAttribute3"
+    # Optional Asterisk lookup for phone IPs. This uses the same AMI connection
+    # that already powers call history and parses active SIP/PJSIP contacts.
+    PHONE_CONTROL_ASTERISK_CONTACTS_ENABLED: bool = True
+    PHONE_CONTROL_ASTERISK_CONTACT_COMMANDS: str = "pjsip show contacts;sip show peers"
+
+    # Legacy Fanvil names are still supported as aliases for existing .env files.
+    FANVIL_ENABLED: bool = False
+    FANVIL_USERNAME: str = ""
+    FANVIL_PASSWORD: str = ""
+    FANVIL_TIMEOUT: float = 4.0
+    FANVIL_PHONE_MAP: str = ""
+    FANVIL_SCHEME: str = "http"
+    FANVIL_DIAL_URL_TEMPLATE: str = "{scheme}://{ip}/cgi-bin/ConfigManApp.com?key={to}"
+    FANVIL_FALLBACK_AMI: bool = True
+
+    # ---------- IP PBX / Asterisk AMI ----------
+    AMI_ENABLED: bool = False
+    AMI_HOST: str = "192.168.30.1"
+    AMI_PORT: int = 5038
+    AMI_USERNAME: str = ""
+    AMI_SECRET: str = ""
+    AMI_RECONNECT_SECONDS: int = 5
+    AMI_DEBUG_EVENTS: bool = False
+    # Originate settings for 1:1 click-to-call. For Asterisk PJSIP use
+    # PJSIP/{ext}; for chan_sip use SIP/{ext}; for dialplan callback you can
+    # set Local/{ext}@from-internal and adjust context/exten below.
+    AMI_ORIGINATE_CHANNEL_TEMPLATE: str = "PJSIP/{ext}"
+    AMI_ORIGINATE_CONTEXT: str = "from-internal"
+    AMI_ORIGINATE_CONTEXT_TEMPLATE: str = "DLPN_DialPlan{from_ext}"
+    AMI_ORIGINATE_DIAL_FALLBACK: bool = False
+    AMI_ORIGINATE_PRIORITY: int = 1
+    AMI_ORIGINATE_TIMEOUT_MS: int = 30000
 
     # ---------- SSO (NTLM / Kerberos / Reverse Proxy) ----------
     SSO_ENABLED: bool = False

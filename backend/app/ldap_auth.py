@@ -268,6 +268,43 @@ def _escape(value: str) -> str:
     return "".join(out)
 
 
+def _domain_root_dn(base_dn: str) -> str:
+    """Return DC=... root from a possibly narrow OU base DN."""
+    parts = [p.strip() for p in str(base_dn or "").split(",") if p.strip()]
+    dcs = [p for p in parts if p.lower().startswith("dc=")]
+    return ",".join(dcs) if dcs else str(base_dn or "").strip()
+
+
+def _unique_search_bases() -> list[str]:
+    bases: list[str] = []
+    base = str(settings.LDAP_BASE_DN or "").strip()
+    domain_root = _domain_root_dn(base)
+    # Common AD layout in this installation, according to ADUC:
+    # OU=Dep,OU=Groups,OU=MAZ-Kupava,DC=kupava,DC=by
+    # Keep these as fallbacks so group search still works when LDAP_BASE_DN is
+    # set to the broader OU=MAZ-Kupava or to a user-only OU.
+    candidates = [
+        getattr(settings, "LDAP_GROUP_BASE_DN", ""),
+    ]
+    if base:
+        candidates.extend([
+            f"OU=Dep,OU=Groups,{base}",
+            f"OU=Groups,{base}",
+            base,
+        ])
+    if domain_root and domain_root.lower() != base.lower():
+        candidates.extend([
+            f"OU=Dep,OU=Groups,OU=MAZ-Kupava,{domain_root}",
+            f"OU=Groups,OU=MAZ-Kupava,{domain_root}",
+            domain_root,
+        ])
+    for b in candidates:
+        b = str(b or "").strip()
+        if b and b.lower() not in [x.lower() for x in bases]:
+            bases.append(b)
+    return bases
+
+
 def group_cn(dn: str) -> str:
     """Extract a human-readable name from a group/OU DN.
 
@@ -326,22 +363,43 @@ def search_groups(query: str, limit: int = 25) -> list[LdapGroup]:
     conn = _open_search_connection()
     try:
         q = _escape(query)
-        # match on cn / sAMAccountName / displayName; objectCategory=group
-        name_filter = f"(|(cn=*{q}*)(sAMAccountName=*{q}*)(displayName=*{q}*))" if query else ""
-        flt = f"(&(objectCategory=group){name_filter})"
-        attrs = ["cn", "sAMAccountName", "displayName", "description", "member"]
-        conn.search(settings.LDAP_BASE_DN, flt, attributes=attrs, size_limit=max(1, min(limit, 100)))
+        # Match on the fields admins normally remember. Keep the filter broad:
+        # some ADs do not fill displayName for groups, some admins search by
+        # description or by only 1-2 letters. This restores the old "type a few
+        # chars and get similar AD groups" behaviour.
+        if query:
+            name_filter = f"(|(cn=*{q}*)(name=*{q}*)(sAMAccountName=*{q}*)(displayName=*{q}*)(description=*{q}*))"
+        else:
+            name_filter = ""
+        flt = f"(&(objectClass=group){name_filter})"
+        attrs = ["cn", "name", "sAMAccountName", "displayName", "description", "member"]
         out: list[LdapGroup] = []
-        for entry in conn.entries:
-            a = entry.entry_attributes_as_dict
-            name = _norm(a.get("cn")) or _norm(a.get("sAMAccountName")) or group_cn(str(entry.entry_dn))
-            members = a.get("member") or []
-            out.append(LdapGroup(
-                dn=str(entry.entry_dn),
-                name=name,
-                description=_norm(a.get("description")),
-                member_count=len(members) if isinstance(members, (list, tuple)) else (1 if members else 0),
-            ))
+        seen_dns: set[str] = set()
+        # Search a configured group base, then LDAP_BASE_DN, then domain root.
+        # This is important when LDAP_BASE_DN is a narrow OU like
+        # OU=MAZ-Kupava,DC=kupava,DC=by but AD groups live elsewhere.
+        for base in _unique_search_bases():
+            ok = conn.search(base, flt, attributes=attrs, size_limit=max(1, min(limit, 200)))
+            if not ok and logger.isEnabledFor(logging.DEBUG):
+                logger.debug("LDAP group search returned ok=%s base=%s result=%s", ok, base, conn.result)
+            for entry in conn.entries:
+                dn = str(entry.entry_dn)
+                if dn.lower() in seen_dns:
+                    continue
+                seen_dns.add(dn.lower())
+                a = entry.entry_attributes_as_dict
+                name = _norm(a.get("cn")) or _norm(a.get("sAMAccountName")) or group_cn(dn)
+                members = a.get("member") or []
+                out.append(LdapGroup(
+                    dn=dn,
+                    name=name,
+                    description=_norm(a.get("description")),
+                    member_count=len(members) if isinstance(members, (list, tuple)) else (1 if members else 0),
+                ))
+                if len(out) >= limit:
+                    break
+            if len(out) >= limit:
+                break
         # sort by closeness: exact/startswith first, then alphabetically
         ql = query.lower()
         out.sort(key=lambda g: (

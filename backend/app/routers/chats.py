@@ -20,12 +20,16 @@ from ..ws_manager import manager
 router = APIRouter(prefix="/api/chats", tags=["chats"])
 
 
-def _member_out(u: User, is_chat_admin: bool) -> ChatMemberOut:
+def _member_out(u: User, cm_or_admin) -> ChatMemberOut:
+    # Accept either ChatMember (preferred) or bool for backward compatibility.
+    is_admin = bool(getattr(cm_or_admin, "is_admin", cm_or_admin))
+    last_read = int(getattr(cm_or_admin, "last_read_message_id", 0) or 0)
     return ChatMemberOut(
         id=u.id, username=u.username, email=u.email, full_name=u.full_name,
-        avatar_color=u.avatar_color, avatar_url=u.avatar_url or "", bio=u.bio, role=u.role,
-        is_active=u.is_active, is_online=manager.is_online(u.id),
-        is_chat_admin=is_chat_admin, last_seen=u.last_seen, created_at=u.created_at,
+        avatar_color=u.avatar_color, avatar_url=u.avatar_url or "", bio=u.bio,
+        title=u.title or "", phone=u.phone or "", office=u.office or "", role=u.role,
+        is_active=u.is_active, is_online=manager.is_online(u.id), status=manager.get_status(u.id),
+        is_chat_admin=is_admin, last_read_message_id=last_read, last_seen=u.last_seen, created_at=u.created_at,
     )
 
 
@@ -39,6 +43,16 @@ def _last_text(last_msg: Message | None):
     return last_msg.text
 
 
+def _last_read_state(last_msg: Message | None, current_user: User, member_rows) -> tuple[bool, bool]:
+    """Return (is_mine, read_by_others) for the chat list Telegram-like ticks."""
+    if not last_msg or last_msg.sender_id != current_user.id:
+        return False, False
+    others = [cm for u, cm in member_rows if u.id != current_user.id and u.is_active]
+    if not others:
+        return True, False
+    return True, all((cm.last_read_message_id or 0) >= last_msg.id for cm in others)
+
+
 def _build_chat_out(chat: Chat, current_user: User, member_rows, last_msg, my_membership, unread: int) -> ChatOut:
     """Build a ChatOut from already-fetched data (no DB access). Used by the
     batched list_chats path for performance."""
@@ -46,12 +60,19 @@ def _build_chat_out(chat: Chat, current_user: User, member_rows, last_msg, my_me
     display_name = chat.name
     display_color = chat.avatar_color
     display_avatar = chat.avatar_url or ""
+    has_other_private_member = False
     for u, cm in member_rows:
-        members.append(_member_out(u, cm.is_admin))
+        members.append(_member_out(u, cm))
         if chat.type == "private" and u.id != current_user.id:
+            has_other_private_member = True
             display_name = u.full_name or u.username
             display_color = u.avatar_color
             display_avatar = u.avatar_url or ""
+    if chat.type == "private" and not has_other_private_member and chat.created_by == current_user.id:
+        display_name = "Избранное"
+        display_color = "#8b5cf6"
+        display_avatar = ""
+    last_is_mine, last_read = _last_read_state(last_msg, current_user, member_rows)
     return ChatOut(
         id=chat.id,
         type=chat.type,
@@ -62,8 +83,12 @@ def _build_chat_out(chat: Chat, current_user: User, member_rows, last_msg, my_me
         created_by=chat.created_by,
         last_message=_last_text(last_msg),
         last_message_at=(last_msg.created_at if last_msg else None),
+        last_message_sender_id=(last_msg.sender_id if last_msg else None),
+        last_message_is_mine=last_is_mine,
+        last_message_read=last_read,
         unread=unread,
         is_muted=(my_membership.is_muted if my_membership else False),
+        last_read_message_id=(my_membership.last_read_message_id if my_membership else 0),
         members=members,
     )
 
@@ -82,14 +107,20 @@ async def _serialize_chat(db: AsyncSession, chat: Chat, current_user: User) -> C
     display_color = chat.avatar_color
     display_avatar = chat.avatar_url or ""
     my_membership = None
+    has_other_private_member = False
     for u, cm in rows:
-        members.append(_member_out(u, cm.is_admin))
+        members.append(_member_out(u, cm))
         if cm.user_id == current_user.id:
             my_membership = cm
         if chat.type == "private" and u.id != current_user.id:
+            has_other_private_member = True
             display_name = u.full_name or u.username
             display_color = u.avatar_color
             display_avatar = u.avatar_url or ""
+    if chat.type == "private" and not has_other_private_member and chat.created_by == current_user.id:
+        display_name = "Избранное"
+        display_color = "#8b5cf6"
+        display_avatar = ""
 
     last_msg = (
         await db.execute(
@@ -125,6 +156,8 @@ async def _serialize_chat(db: AsyncSession, chat: Chat, current_user: User) -> C
         else:
             last_text = last_msg.text
 
+    last_is_mine, last_read = _last_read_state(last_msg, current_user, rows)
+
     return ChatOut(
         id=chat.id,
         type=chat.type,
@@ -135,8 +168,12 @@ async def _serialize_chat(db: AsyncSession, chat: Chat, current_user: User) -> C
         created_by=chat.created_by,
         last_message=last_text,
         last_message_at=(last_msg.created_at if last_msg else None),
+        last_message_sender_id=(last_msg.sender_id if last_msg else None),
+        last_message_is_mine=last_is_mine,
+        last_message_read=last_read,
         unread=unread,
         is_muted=(my_membership.is_muted if my_membership else False),
+        last_read_message_id=(my_membership.last_read_message_id if my_membership else 0),
         members=members,
     )
 
@@ -154,6 +191,36 @@ async def _ensure_member(db: AsyncSession, chat_id: int, user_id: int) -> ChatMe
 
 async def _members_ids(db: AsyncSession, chat_id: int) -> list[int]:
     return list((await db.execute(select(ChatMember.user_id).where(ChatMember.chat_id == chat_id))).scalars().all())
+
+
+async def _get_or_create_saved_chat(db: AsyncSession, user: User) -> Chat:
+    """Telegram-like Saved Messages: a private chat with only the current user.
+
+    It is ensured during chat list load so it is always visible in the chat list,
+    not hidden behind a menu.
+    """
+    candidate_ids = (await db.execute(
+        select(Chat.id).where(Chat.type == "private", Chat.created_by == user.id)
+    )).scalars().all()
+    for cid in candidate_ids:
+        mids = set((await db.execute(select(ChatMember.user_id).where(ChatMember.chat_id == cid))).scalars().all())
+        if mids == {user.id}:
+            chat = (await db.execute(select(Chat).where(Chat.id == cid))).scalar_one()
+            changed = False
+            if chat.name != "Избранное":
+                chat.name = "Избранное"; changed = True
+            if not chat.description:
+                chat.description = "Сохранённые сообщения"; changed = True
+            if changed:
+                await db.commit(); await db.refresh(chat)
+            return chat
+    chat = Chat(type="private", name="Избранное", description="Сохранённые сообщения", avatar_color="#8b5cf6", created_by=user.id)
+    db.add(chat)
+    await db.flush()
+    db.add(ChatMember(chat_id=chat.id, user_id=user.id, is_admin=True))
+    await db.commit()
+    await db.refresh(chat)
+    return chat
 
 
 async def _system_message(db: AsyncSession, chat_id: int, text: str, actor: User) -> None:
@@ -175,6 +242,10 @@ async def list_chats(db: AsyncSession = Depends(get_db), user: User = Depends(ge
     unread) we batch all members, all last-messages and all unread counts into
     one query each — O(1) round-trips regardless of how many chats the user has.
     """
+    # Ensure Telegram-like Saved Messages exists and is visible directly in the
+    # chat list. This is cheap and prevents hiding it behind burger/menu.
+    await _get_or_create_saved_chat(db, user)
+
     # the user's memberships (one query) — gives chat_ids + last_read + mute
     my_memberships = (
         await db.execute(select(ChatMember).where(ChatMember.user_id == user.id))
@@ -243,8 +314,14 @@ async def list_chats(db: AsyncSession = Depends(get_db), user: User = Depends(ge
                         unread_by_chat.get(c.id, 0))
         for c in chats
     ]
-    result.sort(key=lambda c: (c.last_message_at is not None, c.last_message_at or 0), reverse=True)
+    result.sort(key=lambda c: (c.name == "Избранное", c.last_message_at is not None, c.last_message_at or 0), reverse=True)
     return result
+
+
+@router.post("/saved", response_model=ChatOut)
+async def saved_chat(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    chat = await _get_or_create_saved_chat(db, user)
+    return await _serialize_chat(db, chat, user)
 
 
 @router.post("", response_model=ChatOut)
@@ -253,7 +330,20 @@ async def create_chat(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    if data.type not in ("private", "group", "channel"):
+        raise HTTPException(status_code=400, detail="Недопустимый тип чата")
+
     member_ids = set(data.member_ids) | {user.id}
+
+    # Announcement channels are special: every global application admin must be
+    # able to publish there, not only the user who created the channel.  Add all
+    # active global admins as channel members/admins at creation time.
+    admin_ids: set[int] = set()
+    if data.type == "channel":
+        admin_ids = set((
+            await db.execute(select(User.id).where(User.role == "admin", User.is_active == True))  # noqa: E712
+        ).scalars().all())
+        member_ids |= admin_ids
 
     # ---- group permission enforcement ----
     perms = await get_effective_permissions(db, user)
@@ -274,7 +364,9 @@ async def create_chat(
             mids = set((await db.execute(select(ChatMember.user_id).where(ChatMember.chat_id == cid))).scalars().all())
             if mids == {user.id, other_id}:
                 chat = (await db.execute(select(Chat).where(Chat.id == cid))).scalar_one()
-                return await _serialize_chat(db, chat, user)
+                out = await _serialize_chat(db, chat, user)
+                out.is_new = False
+                return out
 
     chat = Chat(
         type=data.type,
@@ -286,12 +378,17 @@ async def create_chat(
     db.add(chat)
     await db.flush()
     for mid in member_ids:
-        db.add(ChatMember(chat_id=chat.id, user_id=mid, is_admin=(mid == user.id)))
+        # In channels, all global application admins are channel admins too, so
+        # they can publish announcements even if they did not create the channel.
+        is_chat_admin = (mid == user.id) or (data.type == "channel" and mid in admin_ids)
+        db.add(ChatMember(chat_id=chat.id, user_id=mid, is_admin=is_chat_admin))
     await db.commit()
     await db.refresh(chat)
 
     await manager.send_to_users([m for m in member_ids if m != user.id], {"type": "chat_created", "chat_id": chat.id})
-    return await _serialize_chat(db, chat, user)
+    out = await _serialize_chat(db, chat, user)
+    out.is_new = True
+    return out
 
 
 @router.get("/{chat_id}", response_model=ChatOut)
@@ -360,7 +457,7 @@ async def add_members(
             continue
         u = (await db.execute(select(User).where(User.id == mid))).scalar_one_or_none()
         if u:
-            db.add(ChatMember(chat_id=chat_id, user_id=mid))
+            db.add(ChatMember(chat_id=chat_id, user_id=mid, is_admin=(chat.type == "channel" and u.role == "admin")))
             added_names.append(u.full_name or u.username)
     await db.commit()
 
@@ -444,7 +541,39 @@ async def mark_read(chat_id: int, db: AsyncSession = Depends(get_db), user: User
     ).scalar() or 0
     cm.last_read_message_id = last
     await db.commit()
+    members = await _members_ids(db, chat_id)
+    await manager.send_to_users([m for m in members if m != user.id], {
+        "type": "read_receipt",
+        "chat_id": chat_id,
+        "user_id": user.id,
+        "last_read_message_id": last,
+    })
     return {"ok": True, "last_read_message_id": last}
+
+
+@router.post("/{chat_id}/discard-empty")
+async def discard_empty_private_chat(chat_id: int, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    """Delete a newly-created private chat if it still has no messages.
+
+    This supports Telegram-like behaviour: selecting a person may create/open a
+    private chat draft, but if the user leaves/closes without sending anything,
+    the empty chat disappears for both sides.
+    """
+    cm = await _ensure_member(db, chat_id, user.id)
+    chat = (await db.execute(select(Chat).where(Chat.id == chat_id))).scalar_one_or_none()
+    if not chat or chat.type != "private":
+        return {"ok": True, "deleted": False}
+    # Only the creator (or admin) may discard the empty draft chat.
+    if chat.created_by != user.id and user.role != "admin":
+        return {"ok": True, "deleted": False}
+    msg_count = (await db.execute(select(func.count()).select_from(Message).where(Message.chat_id == chat_id))).scalar() or 0
+    if msg_count > 0:
+        return {"ok": True, "deleted": False}
+    members = await _members_ids(db, chat_id)
+    await db.delete(chat)
+    await db.commit()
+    await manager.send_to_users(members, {"type": "chat_deleted", "chat_id": chat_id})
+    return {"ok": True, "deleted": True}
 
 
 @router.delete("/{chat_id}")

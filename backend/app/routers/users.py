@@ -4,9 +4,9 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
-from ..models import Group, User
+from ..models import Group, ManualContact, User
 from ..permissions import get_effective_permissions
-from ..schemas import MyPermissionsOut, UserOut, UserUpdate
+from ..schemas import ManualContactOut, MyPermissionsOut, UserOut, UserUpdate
 from ..security import get_current_user
 from ..ws_manager import manager
 
@@ -55,6 +55,9 @@ async def list_users(
                 User.username.ilike(like),
                 User.full_name.ilike(like),
                 User.email.ilike(like),
+                User.phone.ilike(like),
+                User.title.ilike(like),
+                User.office.ilike(like),
             )
         )
     stmt = stmt.order_by(User.full_name, User.username).limit(limit)
@@ -63,8 +66,103 @@ async def list_users(
     for u in rows:
         out = UserOut.model_validate(u)
         out.is_online = manager.is_online(u.id)
+        out.status = manager.get_status(u.id)
         result.append(out)
     return result
+
+
+@router.get("/manual-contacts", response_model=list[ManualContactOut])
+async def manual_contacts(
+    q: str = "",
+    limit: int = 1000,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Text-only contacts created manually by admins.
+
+    These entries are deliberately separate from users and appear only in the
+    Contact Book.
+    """
+    limit = max(1, min(limit, 2000))
+    stmt = select(ManualContact).where(ManualContact.is_active == True)  # noqa: E712
+    if q:
+        like = f"%{q}%"
+        stmt = stmt.where(
+            or_(
+                ManualContact.full_name.ilike(like),
+                ManualContact.email.ilike(like),
+                ManualContact.phone.ilike(like),
+                ManualContact.title.ilike(like),
+                ManualContact.office.ilike(like),
+                ManualContact.note.ilike(like),
+            )
+        )
+    rows = (await db.execute(stmt.order_by(ManualContact.full_name).limit(limit))).scalars().all()
+    return [ManualContactOut.model_validate(r) for r in rows]
+
+
+@router.get("/org/tree")
+async def org_tree(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Company org structure for the contact book. Uses app Groups as
+    departments (usually imported/synced from AD groups) and users as members.
+    """
+    groups = (await db.execute(select(Group).order_by(Group.is_default, Group.name))).scalars().all()
+    users = (await db.execute(select(User).where(User.is_active == True).order_by(User.full_name, User.username))).scalars().all()  # noqa: E712
+    buckets: dict[int | None, list[User]] = {}
+    for u in users:
+        buckets.setdefault(u.group_id, []).append(u)
+
+    def member(u: User):
+        return {
+            "id": u.id,
+            "username": u.username,
+            "full_name": u.full_name,
+            "email": u.email,
+            "title": u.title or "",
+            "phone": u.phone or "",
+            "office": u.office or "",
+            "avatar_color": u.avatar_color,
+            "avatar_url": u.avatar_url or "",
+            "is_online": manager.is_online(u.id),
+            "role": u.role,
+            "auth_source": u.auth_source,
+        }
+
+    nodes = []
+    for g in groups:
+        # default group covers NULL users and users explicitly pointing to it
+        members = (buckets.get(g.id, []) + buckets.get(None, [])) if g.is_default else buckets.get(g.id, [])
+        nodes.append({
+            "id": g.id,
+            "name": g.name,
+            "raw_name": g.name,
+            "description": g.description or "",
+            "is_default": g.is_default,
+            "ad_group_dn": g.ad_group_dn or "",
+            "member_count": len(members),
+            "online_count": sum(1 for u in members if manager.is_online(u.id)),
+            "members": [member(u) for u in members],
+        })
+
+    # If the default group doesn't exist yet, still show users without group.
+    if not any(n["is_default"] for n in nodes) and buckets.get(None):
+        members = buckets.get(None, [])
+        nodes.append({
+            "id": None,
+            "name": "Пользователи без группы",
+            "raw_name": "Пользователи без группы",
+            "description": "Пользователи без назначенного отдела",
+            "is_default": True,
+            "ad_group_dn": "",
+            "member_count": len(members),
+            "online_count": sum(1 for u in members if manager.is_online(u.id)),
+            "members": [member(u) for u in members],
+        })
+
+    return {"departments": nodes}
 
 
 @router.get("/{user_id}", response_model=UserOut)
@@ -78,6 +176,7 @@ async def get_user(
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     out = UserOut.model_validate(u)
     out.is_online = manager.is_online(u.id)
+    out.status = manager.get_status(u.id)
     return out
 
 

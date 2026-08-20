@@ -48,7 +48,14 @@ def is_image(filename: str, content_type: str | None) -> bool:
 
 
 def save_upload(data: bytes, filename: str, content_type: str | None) -> SavedFile:
-    """Persist an uploaded file. Images also get a thumbnail + dimensions."""
+    """Persist an uploaded file without modifying the original bytes.
+
+    Important: uploaded images are now stored *as-is*. Older builds re-encoded
+    JPEG/PNG images through Pillow which could make a file much larger (for
+    example JPG -> PNG-like recompression, metadata/color profile changes, etc.).
+    We only decode the image to read dimensions and create a separate thumbnail.
+    Downloading the attachment always returns the original uploaded bytes.
+    """
     _ensure_dirs()
     ext = _ext(filename)
     uid = uuid.uuid4().hex
@@ -56,34 +63,37 @@ def save_upload(data: bytes, filename: str, content_type: str | None) -> SavedFi
 
     if is_image(filename, content_type):
         try:
-            img = Image.open(io.BytesIO(data))
-            img = ImageOps.exif_transpose(img)  # honor camera rotation
-            fmt = (img.format or "PNG").upper()
-            if fmt not in ("JPEG", "PNG", "GIF", "WEBP", "BMP"):
-                fmt = "PNG"
-            save_ext = {"JPEG": "jpg"}.get(fmt, fmt.lower())
-            w, h = img.size
+            src_img = Image.open(io.BytesIO(data))
+            # Read dimensions after EXIF transpose so UI displays the intended
+            # orientation, but DO NOT rewrite the original file.
+            display_img = ImageOps.exif_transpose(src_img)
+            w, h = display_img.size
+            fmt = (src_img.format or "").upper()
+            inferred_ext = {"JPEG": "jpg", "PNG": "png", "GIF": "gif", "WEBP": "webp", "BMP": "bmp"}.get(fmt, "")
+            safe_ext = ext if ext and len(ext) <= 12 else (inferred_ext or "img")
 
-            full_rel = f"files/{uid}.{save_ext}"
+            full_rel = f"files/{uid}.{safe_ext}"
             full_path = os.path.join(settings.UPLOAD_DIR, full_rel)
-            # Re-encode to strip metadata; keep animation for GIF.
-            if fmt == "GIF":
-                with open(full_path, "wb") as f:
-                    f.write(data)
-            else:
-                rgb = img.convert("RGB") if fmt == "JPEG" else img
-                rgb.save(full_path, fmt)
+            # Store the original bytes exactly as uploaded.
+            with open(full_path, "wb") as f:
+                f.write(data)
 
-            # thumbnail (max 480px on the long side)
-            thumb_rel = f"thumbs/{uid}.jpg"
-            thumb_path = os.path.join(settings.UPLOAD_DIR, thumb_rel)
-            thumb = img.convert("RGB")
-            thumb.thumbnail((480, 480))
-            thumb.save(thumb_path, "JPEG", quality=82)
+            # Thumbnail is separate. If thumbnail generation fails, keep the
+            # original image and just omit the thumb.
+            thumb_url = ""
+            try:
+                thumb_rel = f"thumbs/{uid}.jpg"
+                thumb_path = os.path.join(settings.UPLOAD_DIR, thumb_rel)
+                thumb = display_img.convert("RGB")
+                thumb.thumbnail((480, 480))
+                thumb.save(thumb_path, "JPEG", quality=82, optimize=True)
+                thumb_url = f"/uploads/{thumb_rel}"
+            except Exception:
+                thumb_url = ""
 
             return SavedFile(
                 url=f"/uploads/{full_rel}",
-                thumb_url=f"/uploads/{thumb_rel}",
+                thumb_url=thumb_url,
                 name=original_name,
                 size=len(data),
                 width=w,
@@ -94,7 +104,7 @@ def save_upload(data: bytes, filename: str, content_type: str | None) -> SavedFi
             # Not a valid image -> fall through and store as a generic file.
             pass
 
-    # generic file
+    # generic file: store original bytes exactly as uploaded.
     safe_ext = ext if ext and len(ext) <= 12 else "bin"
     full_rel = f"files/{uid}.{safe_ext}"
     full_path = os.path.join(settings.UPLOAD_DIR, full_rel)

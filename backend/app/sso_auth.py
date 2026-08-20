@@ -32,6 +32,11 @@ try:
 except ImportError:  # pragma: no cover
     spnego = None
 
+try:
+    import gssapi
+except ImportError:  # pragma: no cover
+    gssapi = None
+
 
 # ---------------------------------------------------------------------------
 # 1. Reverse-proxy SSO (most reliable for production)
@@ -78,6 +83,83 @@ class _NegotiateStore:
         return cls._store.pop(cid, None)
 
 
+
+
+
+
+def _negotiate_token_hint(token: bytes) -> str:
+    """Best-effort token mechanism hint for diagnostics.
+
+    Important: Windows/Chrome SPNEGO NegTokenInit can include several offered
+    mechanism OIDs (Kerberos and NTLM) in the same token. If Kerberos is present
+    we must NOT reject the token just because the NTLM OID is also listed.
+    Raw NTLMSSP is still a definite NTLM token.
+    """
+    if token.startswith(b"NTLMSSP"):
+        return "ntlm-raw"
+    has_kerberos = b"\x2a\x86\x48\x86\xf7\x12\x01\x02\x02" in token  # 1.2.840.113554.1.2.2
+    has_ntlm = b"\x2b\x06\x01\x04\x01\x82\x37\x02\x02\x0a" in token       # 1.3.6.1.4.1.311.2.2.10
+    if has_kerberos and has_ntlm:
+        return "kerberos-in-spnego+ntlm-offered"
+    if has_kerberos:
+        return "kerberos-in-spnego"
+    if has_ntlm:
+        return "ntlm-in-spnego"
+    return "unknown"
+
+def _service_parts() -> tuple[str, str | None]:
+    """Parse SSO_SERVICE_NAME into (service, hostname) for pyspnego.
+
+    Accepts either a full Kerberos SPN like HTTP/chat.company.local@REALM or
+    just a hostname. pyspnego wants service="HTTP" and hostname="host" —
+    passing the full SPN as hostname can make negotiation fall back/behave
+    incorrectly.
+    """
+    raw = (settings.SSO_SERVICE_NAME or "").strip()
+    if not raw:
+        return "HTTP", None
+    # Strip realm part.
+    no_realm = raw.split("@", 1)[0]
+    if "/" in no_realm:
+        service, host = no_realm.split("/", 1)
+        return (service or "HTTP"), (host or None)
+    return "HTTP", no_realm
+
+
+class _GssapiServerContext:
+    """Small adapter with the same surface we use from pyspnego contexts.
+
+    We acquire acceptor credentials explicitly from the configured keytab.
+    This is more reliable in containers than relying on implicit default
+    credential discovery through KRB5_KTNAME.
+    """
+
+    def __init__(self, service: str, hostname: str | None, keytab_path: str | None):
+        if gssapi is None:
+            raise RuntimeError("python-gssapi is not installed")
+        # GSSAPI hostbased service name format is SERVICE@hostname.
+        name_text = f"{service}@{hostname}" if hostname else f"{service}@"
+        name = gssapi.Name(name_text, name_type=gssapi.NameType.hostbased_service)
+        store = None
+        if keytab_path:
+            kt = keytab_path[5:] if keytab_path.startswith("FILE:") else keytab_path
+            store = {"keytab": kt}
+            logger.info("Acquiring explicit GSSAPI acceptor creds name=%s keytab=%s", name_text, kt)
+            self._creds = gssapi.Credentials(name=name, usage="accept", store=store)
+        else:
+            logger.info("Acquiring default GSSAPI acceptor creds name=%s", name_text)
+            self._creds = gssapi.Credentials(name=name, usage="accept")
+        self._ctx = gssapi.SecurityContext(creds=self._creds, usage="accept")
+        self.complete = False
+        self.client_principal = None
+
+    def step(self, token: bytes):
+        out = self._ctx.step(token)
+        self.complete = bool(self._ctx.complete)
+        if self.complete and self._ctx.initiator_name:
+            self.client_principal = str(self._ctx.initiator_name)
+        return out
+
 def _new_server_context() -> Any | None:
     """Create a spnego server context (Negotiate)."""
     if spnego is None:
@@ -98,30 +180,32 @@ def _new_server_context() -> Any | None:
             logger.error("Keytab file not readable: %s", kt_path)
             return None
         logger.info("Keytab found: %s (size=%s)", kt_path, os.path.getsize(kt_path))
-        os.environ["KRB5_KTNAME"] = kt_path
+        os.environ["KRB5_KTNAME"] = kt_path if kt_path.startswith(("FILE:", "DIR:", "WRFILE:")) else "FILE:" + kt_path
     else:
         logger.info("No explicit SSO_KEYTAB_PATH — using default Kerberos keytab")
 
-    logger.info("Creating spnego server context (hostname=%s)", settings.SSO_SERVICE_NAME or "auto")
+    service, hostname = _service_parts()
+    logger.info("Creating Kerberos-only SPNEGO server context (service=%s, hostname=%s, spn=%s)", service, hostname or "auto", settings.SSO_SERVICE_NAME or "auto")
 
     try:
-        if os.name == "nt":  # Windows → SSPI
-            ctx = spnego.server(
-                protocol="negotiate",
-                hostname=settings.SSO_SERVICE_NAME or None,
-            )
-            logger.info("SSPI server context created")
+        if os.name != "nt" and gssapi is not None:
+            # Linux container: explicitly acquire acceptor creds from keytab.
+            ctx = _GssapiServerContext(service, hostname, os.environ.get("KRB5_KTNAME") or kt_path)
+            logger.info("Explicit GSSAPI Kerberos acceptor context created successfully")
             return ctx
 
-        # Linux / macOS → MIT krb5 via keytab
+        # Windows / fallback path via pyspnego. Force Kerberos. Do NOT use
+        # protocol="negotiate" here: when a browser offers NTLM, pyspnego may
+        # try an NTLM acceptor and fail with NTLM_USER_FILE.
         ctx = spnego.server(
-            protocol="negotiate",
-            hostname=settings.SSO_SERVICE_NAME or None,
+            protocol="kerberos",
+            service=service,
+            hostname=hostname,
         )
-        logger.info("MIT krb5 server context created successfully")
+        logger.info("Kerberos server context created successfully")
         return ctx
     except Exception as e:
-        logger.error("SPNEGO server context creation failed: %s", e)
+        logger.error("Kerberos server context creation failed: %s", e)
         logger.error("Traceback: %s", traceback.format_exc())
         return None
 
@@ -149,7 +233,19 @@ def handle_negotiate(authorization: str | None, client_id: str | None = None) ->
         )
 
     token = base64.b64decode(authorization[10:])
-    logger.info("Negotiate token received (len=%s, client_id=%s)", len(token), client_id)
+    hint = _negotiate_token_hint(token)
+    logger.info("Negotiate token received (len=%s, mechanism_hint=%s, client_id=%s)", len(token), hint, client_id)
+    if hint in ("ntlm-raw", "ntlm-in-spnego"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            headers={"WWW-Authenticate": "Negotiate"},
+            detail=(
+                "Kerberos SSO expected, but the browser sent NTLM. "
+                "Use the FQDN that has an HTTP SPN, add the site to the browser/Windows intranet zone, "
+                "verify setspn/keytab, and ensure the client has a Kerberos ticket. "
+                f"mechanism={hint}"
+            ),
+        )
 
     # Try to resume existing context (NTLM needs 3 steps)
     ctx = None
@@ -173,10 +269,17 @@ def handle_negotiate(authorization: str | None, client_id: str | None = None) ->
     except Exception as e:
         logger.error("SPNEGO step failed: %s", e)
         logger.error("Traceback: %s", traceback.format_exc())
+        msg = str(e)
+        if "NTLM" in msg or "BadMechanism" in type(e).__name__ or "common mechanism" in msg:
+            msg = (
+                "Kerberos SSO expected, but the browser/client offered NTLM or no usable Kerberos ticket. "
+                "Check SPN, keytab, DNS/FQDN, browser Integrated Auth settings and that the site is in the intranet/trusted zone. "
+                f"Original error: {type(e).__name__}: {e}"
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             headers={"WWW-Authenticate": "Negotiate"},
-            detail=f"Invalid SSO credentials: {type(e).__name__}: {e}",
+            detail=msg,
         )
 
     if not ctx.complete:
