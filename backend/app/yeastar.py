@@ -162,8 +162,8 @@ def yeastar_dial(from_ext: str, to_ext: str) -> dict[str, str | bool | int]:
         return YeastarResult(False, err, from_ext, to_ext).as_dict()
 
     payload: dict[str, object] = {
-        "caller": from_ext,
-        "callee": to_ext,
+        "caller": to_ext,
+        "callee": from_ext,
     }
     #auto_answer = str(settings.YEASTAR_AUTO_ANSWER or "").strip().lower()
     #if auto_answer in ("yes", "no"):
