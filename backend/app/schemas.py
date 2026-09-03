@@ -92,6 +92,7 @@ class CreateChatRequest(BaseModel):
     name: str = Field(default="", max_length=128)
     description: str = Field(default="", max_length=500)
     member_ids: list[int] = Field(default_factory=list)
+    add_all: bool = False
 
 
 class UpdateChatRequest(BaseModel):
@@ -102,6 +103,7 @@ class UpdateChatRequest(BaseModel):
 
 class AddMembersRequest(BaseModel):
     member_ids: list[int] = Field(default_factory=list)
+    add_all: bool = False
 
 
 class ChatOut(BaseModel):
@@ -123,6 +125,8 @@ class ChatOut(BaseModel):
     # True only in create-chat response when a private chat was just created.
     # Used by frontend to discard empty draft private chats if user leaves without writing.
     is_new: bool = False
+    member_count: int = 0
+    online_count: int = 0
     members: list["ChatMemberOut"] = Field(default_factory=list)
 
 
@@ -329,6 +333,7 @@ class ServerSettingsOut(BaseModel):
     ldap_enabled: bool = False
     app_title: str = "Corporate Chat"
     brand_color: str = "#3390ec"
+    notify_duration_sec: int = 5
 
 
 class ServerSettingsUpdate(BaseModel):
@@ -339,6 +344,7 @@ class ServerSettingsUpdate(BaseModel):
     ldap_enabled: Optional[bool] = None
     app_title: Optional[str] = Field(default=None, max_length=64)
     brand_color: Optional[str] = Field(default=None, max_length=16)
+    notify_duration_sec: Optional[int] = Field(default=None, ge=1, le=30)
 
 
 class UploadResult(BaseModel):
@@ -551,3 +557,19 @@ class DownloadEventOut(BaseModel):
 ChatOut.model_rebuild()
 TokenResponse.model_rebuild()
 ImportAdGroupResult.model_rebuild()
+
+
+class UserLiteOut(BaseModel):
+    """Directory row for sidebar / pickers (no bio/last_seen)."""
+    id: int
+    username: str
+    full_name: str = ""
+    avatar_color: str = "#3390ec"
+    avatar_url: str = ""
+    email: str = ""
+    phone: str = ""
+    title: str = ""
+    office: str = ""
+    is_online: bool = False
+    status: str = "offline"
+    is_chat_admin: bool = False

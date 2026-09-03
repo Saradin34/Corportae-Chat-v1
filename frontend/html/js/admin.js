@@ -71,6 +71,7 @@
   function iconLabel(name, text) { return `${icon(name)}<span>${text}</span>`; }
 
   async function mount() {
+    if (window.loadAppConfig) window.loadAppConfig();
     const me = API.Store.getUser();
     if (!me || me.role !== "admin") {
       window.toast("Доступ только для администраторов", "error");
@@ -1126,6 +1127,20 @@
               <div class="setting-row"><div><label>Основной цвет</label><div class="settings-sub">Кнопки и акценты</div></div><input type="color" id="s-color" value="${esc(s.brand_color)}" /></div>
             </section>
             <section class="settings-card-admin">
+              <h3>🔔 Уведомления</h3>
+              <p>Время показа всплывающих уведомлений в веб-версии и на десктопе: сообщения, входящие и пропущенные звонки.</p>
+              <div class="setting-row notify-duration-row">
+                <div>
+                  <label>Длительность уведомления</label>
+                  <div class="settings-sub">Сейчас можно увеличить или уменьшить относительно 5 секунд</div>
+                </div>
+                <div class="notify-duration-ctrl">
+                  <input type="range" id="s-notify-sec" min="1" max="30" step="1" value="${s.notify_duration_sec || 5}" />
+                  <b id="s-notify-sec-label">${s.notify_duration_sec || 5} сек</b>
+                </div>
+              </div>
+            </section>
+            <section class="settings-card-admin">
               <h3>${icon("phone")} IP АТС / AMI</h3>
               <p>Настройки подключения задаются в .env и применяются после пересоздания backend.</p>
               <div class="settings-sub env-list">AMI_ENABLED, AMI_HOST, AMI_PORT, AMI_USERNAME, AMI_SECRET</div>
@@ -1138,6 +1153,9 @@
         </div>`;
       document.getElementById("s-save").addEventListener("click", saveSettings);
       document.getElementById("s-save-top").addEventListener("click", saveSettings);
+      const dur = document.getElementById("s-notify-sec");
+      const durLab = document.getElementById("s-notify-sec-label");
+      if (dur && durLab) dur.addEventListener("input", () => { durLab.textContent = dur.value + " сек"; });
       const diag = document.getElementById("open-diag-from-settings");
       if (diag) diag.addEventListener("click", () => {
         currentTab = "diagnostics";
@@ -1157,9 +1175,11 @@
       ldap_enabled: document.getElementById("s-ldap").checked,
       app_title: document.getElementById("s-title").value.trim(),
       brand_color: document.getElementById("s-color").value,
+      notify_duration_sec: parseInt((document.getElementById("s-notify-sec") || {}).value, 10) || 5,
     };
     try {
       await API.adminUpdateSettings(patch);
+      window.__notifyDurationMs = Math.min(30, Math.max(1, patch.notify_duration_sec || 5)) * 1000;
       window.toast("Настройки сохранены", "success");
     } catch (e) { window.toast(e.message, "error"); }
   }
