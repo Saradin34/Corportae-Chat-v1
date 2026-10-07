@@ -20,7 +20,12 @@ router = APIRouter(prefix="/api/chats/{chat_id}/messages", tags=["messages"])
 
 
 async def _members(db: AsyncSession, chat_id: int) -> list[int]:
-    return list((await db.execute(select(ChatMember.user_id).where(ChatMember.chat_id == chat_id))).scalars().all())
+    cached = manager.cached_members(chat_id)
+    if cached is not None:
+        return cached
+    ids = list((await db.execute(select(ChatMember.user_id).where(ChatMember.chat_id == chat_id))).scalars().all())
+    manager.remember_members(chat_id, ids)
+    return ids
 
 
 async def _ensure_member(db: AsyncSession, chat_id: int, user_id: int) -> ChatMember:
@@ -156,6 +161,23 @@ async def search_messages(
     return [_to_out(m, s, reacts.get(m.id, [])) for m, s in rows]
 
 
+@router.get("/by-id/{message_id}", response_model=MessageOut)
+async def get_message(chat_id: int, message_id: int, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    await _ensure_member(db, chat_id, user.id)
+    row = (
+        await db.execute(
+            select(Message, User).join(User, User.id == Message.sender_id).where(
+                Message.chat_id == chat_id, Message.id == message_id, Message.is_deleted == False  # noqa: E712
+            )
+        )
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Сообщение не найдено")
+    msg, sender = row
+    reacts = (await _reactions_for(db, [msg.id], user.id)).get(msg.id, [])
+    return _to_out(msg, sender, reacts)
+
+
 @router.post("", response_model=MessageOut)
 async def send_message(
     chat_id: int,
@@ -205,7 +227,7 @@ async def send_message(
     await db.commit()
     await db.refresh(msg)
     out = _to_out(msg, user, [])
-    await manager.send_to_users(await _members(db, chat_id), {"type": "new_message", "message": out.model_dump(mode="json")})
+    manager.spawn(manager.send_to_users(await _members(db, chat_id), {"type": "new_message", "message": out.model_dump(mode="json")}))
     return out
 
 
@@ -245,7 +267,7 @@ async def forward_message(
     await db.commit()
     await db.refresh(fwd)
     out = _to_out(fwd, user, [])
-    await manager.send_to_users(await _members(db, data.to_chat_id), {"type": "new_message", "message": out.model_dump(mode="json")})
+    manager.spawn(manager.send_to_users(await _members(db, data.to_chat_id), {"type": "new_message", "message": out.model_dump(mode="json")}))
     return out
 
 
@@ -272,7 +294,7 @@ async def edit_message(
     await db.refresh(msg)
     reacts = (await _reactions_for(db, [msg.id], user.id)).get(msg.id, [])
     out = _to_out(msg, user, reacts)
-    await manager.send_to_users(await _members(db, chat_id), {"type": "edit_message", "message": out.model_dump(mode="json")})
+    manager.spawn(manager.send_to_users(await _members(db, chat_id), {"type": "edit_message", "message": out.model_dump(mode="json")}))
     return out
 
 
@@ -299,7 +321,7 @@ async def delete_message(
     # replies to this message are set NULL by FK ondelete.
     await db.delete(msg)
     await db.commit()
-    await manager.send_to_users(await _members(db, chat_id), {"type": "delete_message", "chat_id": chat_id, "message_id": message_id, "hard": True})
+    manager.spawn(manager.send_to_users(await _members(db, chat_id), {"type": "delete_message", "chat_id": chat_id, "message_id": message_id, "hard": True}))
     return {"ok": True, "deleted_for_all": True}
 
 
@@ -323,7 +345,7 @@ async def toggle_pin(
         raise HTTPException(status_code=404, detail="Сообщение не найдено")
     msg.is_pinned = not msg.is_pinned
     await db.commit()
-    await manager.send_to_users(await _members(db, chat_id), {"type": "pin_changed", "chat_id": chat_id, "message_id": message_id, "is_pinned": msg.is_pinned})
+    manager.spawn(manager.send_to_users(await _members(db, chat_id), {"type": "pin_changed", "chat_id": chat_id, "message_id": message_id, "is_pinned": msg.is_pinned}))
     return {"ok": True, "is_pinned": msg.is_pinned}
 
 
@@ -363,5 +385,5 @@ async def react(
         "message_id": message_id,
         "reactions": [r.model_dump() for r in reacts],
     }
-    await manager.send_to_users(await _members(db, chat_id), payload)
+    manager.spawn(manager.send_to_users(await _members(db, chat_id), payload))
     return {"ok": True, "reactions": [r.model_dump() for r in reacts]}

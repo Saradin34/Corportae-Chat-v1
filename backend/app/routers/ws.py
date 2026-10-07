@@ -1,4 +1,5 @@
 """WebSocket endpoint for real-time messaging & presence."""
+import asyncio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 
@@ -66,16 +67,13 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
 
     await manager.connect(user_id, ws)
 
-    # update presence
-    async with async_session_maker() as db:
-        u = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-        if u:
-            u.is_online = True
-            await db.commit()
-
+    # Presence lives in the in-memory manager. Do NOT write users.is_online
+    # on every connect — 120 logins would stampede the DB pool.
     manager.set_status(user_id, "online")
     peers = await _presence_recipients(user_id)
-    await manager.send_to_users(peers, {"type": "presence", "user_id": user_id, "online": True, "status": "online"})
+    manager.spawn(
+        manager.send_to_users(peers, {"type": "presence", "user_id": user_id, "online": True, "status": "online"})
+    )
 
     try:
         while True:
@@ -88,10 +86,10 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
                 new_status = data.get("status", "online")
                 manager.set_status(user_id, new_status)
                 peers = await _presence_recipients(user_id)
-                await manager.send_to_users(
+                manager.spawn(manager.send_to_users(
                     peers,
                     {"type": "presence", "user_id": user_id, "online": True, "status": manager.get_status(user_id)},
-                )
+                ))
             elif mtype == "typing":
                 chat_id = data.get("chat_id")
                 if chat_id:
@@ -101,10 +99,10 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
                                 select(ChatMember.user_id).where(ChatMember.chat_id == chat_id)
                             )
                         ).scalars().all()
-                    await manager.send_to_users(
+                    manager.spawn(manager.send_to_users(
                         [m for m in members if m != user_id],
                         {"type": "typing", "chat_id": chat_id, "user_id": user_id, "username": user.username},
-                    )
+                    ))
             elif mtype in ("call_invite", "call_accept", "call_reject", "call_end", "call_signal"):
                 chat_id = data.get("chat_id")
                 try:
@@ -132,10 +130,7 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
     finally:
         await manager.disconnect(user_id, ws)
         if not manager.is_online(user_id):
-            async with async_session_maker() as db:
-                u = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-                if u:
-                    u.is_online = False
-                    await db.commit()
             peers = await _presence_recipients(user_id)
-            await manager.send_to_users(peers, {"type": "presence", "user_id": user_id, "online": False, "status": "offline"})
+            manager.spawn(
+                manager.send_to_users(peers, {"type": "presence", "user_id": user_id, "online": False, "status": "offline"})
+            )

@@ -1,6 +1,7 @@
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 using System.Diagnostics;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Runtime.InteropServices;
 using Velopack;
@@ -21,6 +22,15 @@ public sealed class MainForm : Form
     private int _chatUnread;
     private int _callUnread;
     private readonly Dictionary<string, Icon?> _stateIcons = new();
+    private PathDropOverlay? _pathDropOverlay;
+    private bool _pathDropArmed;
+    private double _dropCssX, _dropCssY, _dropCssW, _dropCssH;
+    private string[] _dropPaths = Array.Empty<string>();
+    private readonly System.Windows.Forms.Timer _pathDropWatch = new() { Interval = 200 };
+    private static readonly JsonSerializerOptions DropJson = new()
+    {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
 
     public MainForm()
     {
@@ -51,6 +61,14 @@ public sealed class MainForm : Form
 
         Shown += async (_, _) => await InitWebViewAsync();
         FormClosing += OnFormClosing;
+        LocationChanged += (_, _) => { if (_pathDropArmed) PositionPathDropOverlay(); };
+        SizeChanged += (_, _) => { if (_pathDropArmed) PositionPathDropOverlay(); };
+        _pathDropWatch.Tick += (_, _) =>
+        {
+            if (!_pathDropArmed) { _pathDropWatch.Stop(); return; }
+            if ((GetAsyncKeyState(0x01) & 0x8000) == 0)
+                ParkPathDropOverlay();
+        };
     }
 
     private Icon? TryLoadIcon(string fileName = "app-main.png")
@@ -160,8 +178,19 @@ public sealed class MainForm : Form
     hardReload: () => post('hardReload'),
     clearCache: () => post('clearCache'),
     changeServer: () => post('changeServer'),
-    openLocalPath: (path) => post('openLocalPath', { path: path })
+    openLocalPath: (path) => post('openLocalPath', { path: path }),
+    fileDrag: (data) => post('fileDrag', data || {})
   };
+  try {
+    window.chrome.webview.addEventListener('message', function (ev) {
+      var d = ev && ev.data;
+      if (typeof d === 'string') { try { d = JSON.parse(d); } catch (e) { return; } }
+      if (d && d.type === 'nativeDropPaths' && d.paths) {
+        window.__nativeDropPaths = d.paths;
+        window.__nativeDropPathsAt = Date.now();
+      }
+    });
+  } catch (e) {}
   try { window.dispatchEvent(new Event('CorporateChatDesktopReady')); } catch (e) {}
 })();");
 
@@ -212,6 +241,7 @@ public sealed class MainForm : Form
             _web.CoreWebView2.Settings.AreDevToolsEnabled = false;
             _web.CoreWebView2.Settings.IsStatusBarEnabled = false;
 
+            EnsurePathDropOverlay();
             _web.CoreWebView2.Navigate(NormalizeServer(_config.Server));
         }
         catch (Exception ex)
@@ -221,8 +251,126 @@ public sealed class MainForm : Form
     }
 
 
+    private void EnsurePathDropOverlay()
+    {
+        if (_pathDropOverlay != null) return;
+        _pathDropOverlay = new PathDropOverlay();
+        _pathDropOverlay.PathsAvailable += (_, data) => CacheFileDrop(data, false);
+        _pathDropOverlay.PathsDropped += (_, data) =>
+        {
+            CacheFileDrop(data, true);
+            ParkPathDropOverlay();
+        };
+        _pathDropOverlay.FormClosing += (_, e) =>
+        {
+            if (e.CloseReason == CloseReason.UserClosing)
+            {
+                e.Cancel = true;
+                ParkPathDropOverlay();
+            }
+        };
+        try { _pathDropOverlay.Show(this); }
+        catch { }
+        ParkPathDropOverlay();
+    }
+
+    private void ArmPathDropOverlay(double x, double y, double w, double h)
+    {
+        _dropCssX = x;
+        _dropCssY = y;
+        _dropCssW = w;
+        _dropCssH = h;
+        _pathDropArmed = true;
+        EnsurePathDropOverlay();
+        PositionPathDropOverlay();
+        _pathDropWatch.Start();
+    }
+
+    private void ParkPathDropOverlay()
+    {
+        var wasArmed = _pathDropArmed;
+        _pathDropArmed = false;
+        _pathDropWatch.Stop();
+        if (_pathDropOverlay != null && !_pathDropOverlay.IsDisposed)
+        {
+            try { _pathDropOverlay.Bounds = new Rectangle(-4000, -4000, 8, 8); }
+            catch { }
+        }
+        if (wasArmed) PushFileDragEnded();
+    }
+
+    private void PushFileDragEnded()
+    {
+        try { _web.CoreWebView2?.PostWebMessageAsJson("{\"type\":\"fileDragEnded\"}"); }
+        catch { }
+    }
+
+    private void PositionPathDropOverlay()
+    {
+        if (_pathDropOverlay == null || _pathDropOverlay.IsDisposed || !_pathDropArmed) return;
+        try
+        {
+            var zoom = _web.ZoomFactor <= 0 ? 1.0 : _web.ZoomFactor;
+            var topLeft = _web.PointToScreen(new Point(
+                (int)Math.Round(_dropCssX * zoom),
+                (int)Math.Round(_dropCssY * zoom)));
+            var bottomRight = _web.PointToScreen(new Point(
+                (int)Math.Round((_dropCssX + _dropCssW) * zoom),
+                (int)Math.Round((_dropCssY + _dropCssH) * zoom)));
+            var w = Math.Max(40, bottomRight.X - topLeft.X);
+            var h = Math.Max(40, bottomRight.Y - topLeft.Y);
+            _pathDropOverlay.Bounds = new Rectangle(topLeft.X, topLeft.Y, w, h);
+        }
+        catch { }
+    }
+
+    private void CacheFileDrop(IDataObject? data, bool commit)
+    {
+        var paths = ExtractFileDrop(data);
+        if (paths.Length == 0) return;
+        _dropPaths = paths;
+        PushDropPathsToJs(paths, commit);
+    }
+
+    private static string[] ExtractFileDrop(IDataObject? data)
+    {
+        try
+        {
+            if (data != null && data.GetDataPresent(DataFormats.FileDrop) &&
+                data.GetData(DataFormats.FileDrop) is string[] paths &&
+                paths.Length > 0)
+            {
+                return paths.Where(p => !string.IsNullOrWhiteSpace(p)).ToArray();
+            }
+        }
+        catch { }
+        return Array.Empty<string>();
+    }
+
+    private void PushDropPathsToJs(string[] paths, bool commit)
+    {
+        try
+        {
+            if (_web.CoreWebView2 == null) return;
+            var json = JsonSerializer.Serialize(new
+            {
+                type = "nativeDropPaths",
+                paths,
+                commit
+            }, DropJson);
+            _web.CoreWebView2.PostWebMessageAsJson(json);
+        }
+        catch { }
+    }
+
     private void HandleWebMessage(string json)
     {
+        if (IsDisposed) return;
+        if (InvokeRequired)
+        {
+            BeginInvoke(new Action(() => HandleWebMessage(json)));
+            return;
+        }
         try
         {
             var msg = JsonSerializer.Deserialize<DesktopMessage>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
@@ -246,6 +394,12 @@ public sealed class MainForm : Form
                     break;
                 case "openLocalPath":
                     OpenLocalPath(msg.Path ?? "");
+                    break;
+                case "fileDrag":
+                    if (msg.Over && msg.W > 1 && msg.H > 1)
+                        ArmPathDropOverlay(msg.X, msg.Y, msg.W, msg.H);
+                    else
+                        ParkPathDropOverlay();
                     break;
             }
         }
@@ -276,6 +430,9 @@ public sealed class MainForm : Form
 
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
     private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
 
     private const int WM_SETICON = 0x0080;
     private static readonly IntPtr ICON_SMALL = new(0);
@@ -466,8 +623,14 @@ public sealed class MainForm : Form
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
-        if (_reallyExit) return;
+        if (_reallyExit)
+        {
+            try { _pathDropWatch.Stop(); } catch { }
+            try { _pathDropOverlay?.Dispose(); } catch { }
+            return;
+        }
         e.Cancel = true;
+        ParkPathDropOverlay();
         WindowState = FormWindowState.Minimized;
     }
 
@@ -622,6 +785,68 @@ public sealed class MainForm : Form
         public int CallUnread { get; set; }
         public bool Flash { get; set; }
         public string? Path { get; set; }
+        public bool Over { get; set; }
+        public double X { get; set; }
+        public double Y { get; set; }
+        public double W { get; set; }
+        public double H { get; set; }
+    }
+
+    private sealed class PathDropOverlay : Form
+    {
+        public event EventHandler<IDataObject>? PathsAvailable;
+        public event EventHandler<IDataObject>? PathsDropped;
+
+        public PathDropOverlay()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            AllowDrop = true;
+            Opacity = 0.16;
+            BackColor = Color.FromArgb(15, 118, 110);
+            Width = 8;
+            Height = 8;
+            Location = new Point(-4000, -4000);
+            DragEnter += OnDragEnter;
+            DragOver += OnDragOver;
+            DragDrop += OnDragDrop;
+        }
+
+        protected override bool ShowWithoutActivation => true;
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var cp = base.CreateParams;
+                cp.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE
+                return cp;
+            }
+        }
+
+        private void OnDragEnter(object? sender, DragEventArgs e)
+        {
+            if (e.Data != null && e.Data.GetDataPresent(DataFormats.FileDrop))
+            {
+                e.Effect = DragDropEffects.Copy;
+                PathsAvailable?.Invoke(this, e.Data);
+            }
+            else e.Effect = DragDropEffects.None;
+        }
+
+        private void OnDragOver(object? sender, DragEventArgs e)
+        {
+            e.Effect = (e.Data != null && e.Data.GetDataPresent(DataFormats.FileDrop))
+                ? DragDropEffects.Copy
+                : DragDropEffects.None;
+        }
+
+        private void OnDragDrop(object? sender, DragEventArgs e)
+        {
+            if (e.Data != null && e.Data.GetDataPresent(DataFormats.FileDrop))
+                PathsDropped?.Invoke(this, e.Data);
+        }
     }
 
     private sealed class AppConfig

@@ -10,7 +10,7 @@ from .. import app_settings
 from ..database import get_db
 from ..models import AuditLog, User
 from ..schemas import ServerSettingsOut, ServerSettingsUpdate
-from ..security import get_current_admin
+from ..security import get_current_admin, get_current_user
 
 router = APIRouter(prefix="/api/admin/settings", tags=["settings"])
 
@@ -35,3 +35,18 @@ async def update_settings(
     ))
     await db.commit()
     return ServerSettingsOut(**merged)
+
+
+public_router = APIRouter(prefix="/api/config", tags=["settings"])
+
+
+@public_router.get("")
+async def client_config(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    """Public (logged-in) config used by web and desktop clients."""
+    data = await app_settings.load_all(db)
+    sec = int(data.get("notify_duration_sec") or 5)
+    if sec < 1:
+        sec = 1
+    if sec > 30:
+        sec = 30
+    return {"notify_duration_sec": sec}

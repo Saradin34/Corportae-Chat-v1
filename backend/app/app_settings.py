@@ -20,6 +20,7 @@ _SPEC = {
     "ldap_enabled": (bool, lambda: env_settings.LDAP_ENABLED),
     "app_title": (str, lambda: env_settings.APP_NAME),
     "brand_color": (str, lambda: "#3390ec"),
+    "notify_duration_sec": (int, lambda: 5),
 }
 
 _cache: dict[str, object] = {}
