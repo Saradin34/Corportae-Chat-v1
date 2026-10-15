@@ -71,6 +71,7 @@
   function iconLabel(name, text) { return `${icon(name)}<span>${text}</span>`; }
 
   async function mount() {
+    if (window.loadAppConfig) window.loadAppConfig();
     const me = API.Store.getUser();
     if (!me || me.role !== "admin") {
       window.toast("Доступ только для администраторов", "error");
@@ -637,11 +638,103 @@
   }
 
   // ---------- Chats ----------
+  function openChannelPublishers(chatId, chatName) {
+    const overlay = document.getElementById("modal-overlay") || createOverlay();
+    overlay.innerHTML = `
+      <div class="modal modal-lg">
+        <div class="modal-header"><h2>Авторы канала «${esc(chatName)}»</h2><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="settings-sub" style="margin-bottom:12px">Писать могут администраторы системы и сотрудники из списка. Остальные только читают. Поиск не загружает весь состав.</div>
+          <div class="field"><label>Найти сотрудника</label><input type="text" id="pub-search" placeholder="Имя или логин (от 2 символов)" autocomplete="off" /></div>
+          <div id="pub-search-results"></div>
+          <div class="list-section-title" style="margin-top:12px">Могут писать</div>
+          <div id="pub-list"><div class="list-empty">Загрузка…</div></div>
+        </div>
+        <div class="modal-footer"><button class="btn-secondary" id="modal-cancel">Закрыть</button></div>
+      </div>`;
+    overlay.classList.add("show");
+    function close() { overlay.classList.remove("show"); overlay.innerHTML = ""; }
+    overlay.querySelector(".modal-close").addEventListener("click", close);
+    document.getElementById("modal-cancel").addEventListener("click", close);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    let publishers = [];
+    async function refreshList() {
+      const box = document.getElementById("pub-list");
+      if (!box) return;
+      try {
+        const r = await API.adminChannelPublishers(chatId);
+        publishers = r.publishers || [];
+        if (!publishers.length) { box.innerHTML = `<div class="list-empty">Пока только администраторы системы</div>`; return; }
+        box.innerHTML = publishers.map((p) => `
+          <div class="user-pick-item">
+            <div class="avatar sm" style="background:${esc(p.avatar_color || "#3390ec")}">${esc((p.full_name || p.username || "?").slice(0, 1).toUpperCase())}</div>
+            <div class="user-pick-name">
+              <div class="un">${esc(p.full_name || p.username)}${p.locked ? ' <span class="badge admin">админ системы</span>' : ""}</div>
+              <div class="uh">@${esc(p.username || "")}</div>
+            </div>
+            ${p.locked ? `<span class="settings-sub">всегда</span>` : `<button class="mini-btn danger" data-revoke="${p.id}">Запретить</button>`}
+          </div>`).join("");
+        box.querySelectorAll("button[data-revoke]").forEach((b) => b.addEventListener("click", async () => {
+          b.disabled = true;
+          try {
+            await API.adminSetPublisher(chatId, parseInt(b.getAttribute("data-revoke"), 10), false);
+            window.toast("Запрещено писать", "success");
+            refreshList();
+          } catch (e) { window.toast(e.message, "error"); b.disabled = false; }
+        }));
+      } catch (e) { box.innerHTML = `<div class="list-empty">${esc(e.message)}</div>`; }
+    }
+    const searchEl = document.getElementById("pub-search");
+    const resultsEl = document.getElementById("pub-search-results");
+    let searchTimer = null;
+    searchEl.addEventListener("input", () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(runSearch, 220);
+    });
+    async function runSearch() {
+      const q = (searchEl.value || "").trim();
+      if (q.length < 2) { resultsEl.innerHTML = ""; return; }
+      try {
+        const users = await API.adminUsers(q);
+        const have = new Set(publishers.map((p) => p.id));
+        const rows = (users || []).filter((u) => u.is_active && !have.has(u.id)).slice(0, 20);
+        if (!rows.length) { resultsEl.innerHTML = `<div class="list-empty">Никого не найдено</div>`; return; }
+        resultsEl.innerHTML = rows.map((u) => `
+          <div class="user-pick-item">
+            <div class="avatar sm" style="background:${esc(u.avatar_color || "#3390ec")}">${esc((u.full_name || u.username || "?").slice(0, 1).toUpperCase())}</div>
+            <div class="user-pick-name">
+              <div class="un">${esc(u.full_name || u.username)}${u.role === "admin" ? ' <span class="badge admin">админ</span>' : ""}</div>
+              <div class="uh">@${esc(u.username || "")}</div>
+            </div>
+            <button class="mini-btn primary" data-grant="${u.id}">Разрешить</button>
+          </div>`).join("");
+        resultsEl.querySelectorAll("button[data-grant]").forEach((b) => b.addEventListener("click", async () => {
+          b.disabled = true;
+          try {
+            await API.adminSetPublisher(chatId, parseInt(b.getAttribute("data-grant"), 10), true);
+            window.toast("Может писать в канал", "success");
+            searchEl.value = "";
+            resultsEl.innerHTML = "";
+            refreshList();
+          } catch (e) { window.toast(e.message, "error"); b.disabled = false; }
+        }));
+      } catch (e) { resultsEl.innerHTML = `<div class="list-empty">${esc(e.message)}</div>`; }
+    }
+    refreshList();
+  }
+
   async function loadAdminChats() {
     try {
       const chats = await API.adminChats();
       const content = document.getElementById("admin-content");
       content.innerHTML = `
+        <div class="admin-announce-box" style="margin:0 0 18px;padding:14px 16px;border:1px solid var(--border);border-radius:12px;background:var(--bg-secondary)">
+          <div style="font-weight:700;margin-bottom:6px">${icon("broadcast")} Канал объявлений для всех</div>
+          <div class="settings-sub" style="margin-bottom:10px">Создаёт канал, куда попадают все активные пользователи. Писать могут администраторы системы и назначенные авторы (кнопка «Авторы» в таблице). Остальные только читают. Новые сотрудники подключаются сами при входе. «Всех» догоняет тех, кого ещё нет в канале.</div>
+          <div class="field"><label>Название</label><input type="text" id="ann-name" value="Объявления" placeholder="Объявления" /></div>
+          <div class="field"><label>Описание</label><input type="text" id="ann-desc" placeholder="Официальные объявления компании" /></div>
+          <button class="btn-primary inline" id="ann-create">Создать канал на всех</button>
+        </div>
         <div class="admin-table">
           <table>
             <thead><tr><th>ID</th><th>Название</th><th>Тип</th><th>Участников</th><th>Сообщений</th><th>Создан</th><th></th></tr></thead>
@@ -649,11 +742,11 @@
               <tr>
                 <td data-label="ID">${c.id}</td>
                 <td data-label="Название" style="font-weight:600">${esc(c.name)}</td>
-                <td data-label="Тип"><span class="badge ${c.type === "private" ? "user" : "admin"}">${c.type === "private" ? "Личный" : c.type === "group" ? "Группа" : c.type}</span></td>
+                <td data-label="Тип"><span class="badge ${c.type === "private" ? "user" : "admin"}">${c.type === "private" ? "Личный" : c.type === "group" ? "Группа" : c.type === "channel" ? "Канал" : c.type}</span></td>
                 <td data-label="Участников">${c.members}</td>
                 <td data-label="Сообщений">${c.messages}</td>
                 <td data-label="Создан" class="settings-sub">${c.created_at ? new Date(c.created_at).toLocaleDateString("ru-RU") : "—"}</td>
-                <td data-label="Действия"><button class="mini-btn danger" data-del-chat="${c.id}">Удалить</button></td>
+                <td data-label="Действия">${c.type === "channel" ? `<button class="mini-btn" data-authors-chat="${c.id}" data-authors-name="${esc(c.name)}">Авторы</button> <button class="mini-btn" data-sync-chat="${c.id}">Всех</button> ` : ""}<button class="mini-btn danger" data-del-chat="${c.id}">Удалить</button></td>
               </tr>`).join("")}</tbody>
           </table>
         </div>`;
@@ -662,6 +755,39 @@
         try { await API.adminDeleteChat(parseInt(b.getAttribute("data-del-chat"), 10)); window.toast("Чат удалён", "success"); loadStats(); loadAdminChats(); }
         catch (e) { window.toast(e.message, "error"); }
       }));
+      content.querySelectorAll("button[data-sync-chat]").forEach((b) => b.addEventListener("click", async () => {
+        const id = parseInt(b.getAttribute("data-sync-chat"), 10);
+        b.disabled = true;
+        try {
+          const r = await API.adminSyncAnnouncement(id);
+          window.toast("Добавлено недостающих: " + (r.added || 0) + " · всего " + (r.members || 0), "success");
+          loadAdminChats();
+        } catch (e) { window.toast(e.message, "error"); b.disabled = false; }
+      }));
+      content.querySelectorAll("button[data-authors-chat]").forEach((b) => b.addEventListener("click", () => {
+        openChannelPublishers(parseInt(b.getAttribute("data-authors-chat"), 10), b.getAttribute("data-authors-name") || "Канал");
+      }));
+      const annBtn = document.getElementById("ann-create");
+      if (annBtn) annBtn.addEventListener("click", async () => {
+        const name = (document.getElementById("ann-name").value || "").trim() || "Объявления";
+        const description = (document.getElementById("ann-desc").value || "").trim();
+        if (annBtn.dataset.busy === "1") return;
+        if (!(await uiConfirm("Создать канал «" + name + "» и добавить всех активных пользователей? Писать смогут только администраторы."))) return;
+        annBtn.dataset.busy = "1";
+        annBtn.disabled = true;
+        annBtn.textContent = "Создание…";
+        try {
+          const r = await API.adminCreateAnnouncement({ name, description });
+          window.toast("Канал создан · " + (r.members || 0) + " участников", "success");
+          loadStats();
+          loadAdminChats();
+        } catch (e) {
+          window.toast(e.message, "error");
+          annBtn.dataset.busy = "0";
+          annBtn.disabled = false;
+          annBtn.textContent = "Создать канал на всех";
+        }
+      });
     } catch (e) { window.toast(e.message, "error"); }
   }
 
@@ -768,7 +894,7 @@
   }
 
   function actionLabel(a) {
-    const map = { ban: "Блокировка", unban: "Разблокировка", set_role: "Смена роли", reset_password: "Сброс пароля", delete_user: "Удаление юзера", delete_chat: "Удаление чата", broadcast: "Рассылка", impersonate: "Вход под пользователем", force_logout: "Завершение сессии" };
+    const map = { ban: "Блокировка", unban: "Разблокировка", set_role: "Смена роли", reset_password: "Сброс пароля", delete_user: "Удаление юзера", delete_chat: "Удаление чата", create_announcement: "Канал объявлений", sync_announcement: "Догнать состав канала", set_publisher: "Авторы канала", broadcast: "Рассылка", impersonate: "Вход под пользователем", force_logout: "Завершение сессии" };
     return map[a] || a;
   }
 
@@ -1126,6 +1252,20 @@
               <div class="setting-row"><div><label>Основной цвет</label><div class="settings-sub">Кнопки и акценты</div></div><input type="color" id="s-color" value="${esc(s.brand_color)}" /></div>
             </section>
             <section class="settings-card-admin">
+              <h3>🔔 Уведомления</h3>
+              <p>Время показа всплывающих уведомлений в веб-версии и на десктопе: сообщения, входящие и пропущенные звонки.</p>
+              <div class="setting-row notify-duration-row">
+                <div>
+                  <label>Длительность уведомления</label>
+                  <div class="settings-sub">Сейчас можно увеличить или уменьшить относительно 5 секунд</div>
+                </div>
+                <div class="notify-duration-ctrl">
+                  <input type="range" id="s-notify-sec" min="1" max="30" step="1" value="${s.notify_duration_sec || 5}" />
+                  <b id="s-notify-sec-label">${s.notify_duration_sec || 5} сек</b>
+                </div>
+              </div>
+            </section>
+            <section class="settings-card-admin">
               <h3>${icon("phone")} IP АТС / AMI</h3>
               <p>Настройки подключения задаются в .env и применяются после пересоздания backend.</p>
               <div class="settings-sub env-list">AMI_ENABLED, AMI_HOST, AMI_PORT, AMI_USERNAME, AMI_SECRET</div>
@@ -1138,6 +1278,9 @@
         </div>`;
       document.getElementById("s-save").addEventListener("click", saveSettings);
       document.getElementById("s-save-top").addEventListener("click", saveSettings);
+      const dur = document.getElementById("s-notify-sec");
+      const durLab = document.getElementById("s-notify-sec-label");
+      if (dur && durLab) dur.addEventListener("input", () => { durLab.textContent = dur.value + " сек"; });
       const diag = document.getElementById("open-diag-from-settings");
       if (diag) diag.addEventListener("click", () => {
         currentTab = "diagnostics";
@@ -1157,9 +1300,11 @@
       ldap_enabled: document.getElementById("s-ldap").checked,
       app_title: document.getElementById("s-title").value.trim(),
       brand_color: document.getElementById("s-color").value,
+      notify_duration_sec: parseInt((document.getElementById("s-notify-sec") || {}).value, 10) || 5,
     };
     try {
       await API.adminUpdateSettings(patch);
+      window.__notifyDurationMs = Math.min(30, Math.max(1, patch.notify_duration_sec || 5)) * 1000;
       window.toast("Настройки сохранены", "success");
     } catch (e) { window.toast(e.message, "error"); }
   }

@@ -15,6 +15,7 @@ from ..database import get_db
 from ..models import AuditLog, CallEvent, Chat, ChatMember, DownloadEvent, Group, ManualContact, Message, User
 from ..schemas import AdminStats, AuditLogOut, BroadcastRequest, ManualContactOut, TokenResponse, UserOut
 from ..security import create_access_token, get_current_admin, hash_password
+from ..utils import random_color
 from ..ws_manager import manager
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -606,8 +607,9 @@ async def set_role(user_id: int, role: str, db: AsyncSession = Depends(get_db), 
             )).scalar_one_or_none()
             if cm:
                 cm.is_admin = True
+                cm.can_post = True
             else:
-                db.add(ChatMember(chat_id=ch.id, user_id=u.id, is_admin=True))
+                db.add(ChatMember(chat_id=ch.id, user_id=u.id, is_admin=True, can_post=True))
     await db.commit()
     await db.refresh(u)
     await _log(db, admin, "set_role", f"user={u.username} role={role}")
@@ -641,6 +643,204 @@ async def delete_user(user_id: int, db: AsyncSession = Depends(get_db), admin: U
     await db.commit()
     await _log(db, admin, "delete_user", f"user={uname}")
     return {"ok": True}
+
+
+class AdminAnnouncementRequest(BaseModel):
+    name: str = Field(default="Объявления", min_length=1, max_length=128)
+    description: str = Field(default="", max_length=500)
+
+
+@router.post("/chats/announcement")
+async def create_announcement_channel(
+    data: AdminAnnouncementRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Company-wide read-only announcement channel. Only admins can post."""
+    name = (data.name or "").strip() or "Объявления"
+    users = (await db.execute(select(User).where(User.is_active == True))).scalars().all()  # noqa: E712
+    if not users:
+        raise HTTPException(status_code=400, detail="Нет активных пользователей")
+    chat = Chat(
+        type="channel",
+        name=name,
+        description=(data.description or "").strip(),
+        avatar_color=random_color(),
+        created_by=admin.id,
+    )
+    db.add(chat)
+    await db.flush()
+    db.add_all([
+        ChatMember(
+            chat_id=chat.id,
+            user_id=u.id,
+            is_admin=(u.role == "admin" or u.id == admin.id),
+            can_post=(u.role == "admin" or u.id == admin.id),
+        )
+        for u in users
+    ])
+    await db.commit()
+    await db.refresh(chat)
+    member_ids = [u.id for u in users]
+    manager.remember_members(chat.id, member_ids)
+    slim = {
+        "id": chat.id,
+        "type": "channel",
+        "name": chat.name,
+        "description": chat.description or "",
+        "avatar_color": chat.avatar_color,
+        "avatar_url": chat.avatar_url or "",
+        "created_by": admin.id,
+        "members": [],
+        "member_count": len(member_ids),
+        "online_count": 0,
+        "unread": 0,
+        "is_muted": False,
+        "last_message": None,
+        "last_message_at": None,
+    }
+    others = [mid for mid in member_ids if mid != admin.id]
+    manager.spawn(manager.send_to_users(others, {"type": "chat_created", "chat_id": chat.id, "chat": slim}))
+    await _log(db, admin, "create_announcement", f"chat={chat.id} name={name} members={len(member_ids)}")
+    return {"ok": True, "id": chat.id, "name": chat.name, "members": len(member_ids)}
+
+
+@router.post("/chats/{chat_id}/sync-all")
+async def sync_announcement_members(
+    chat_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Add every active user missing from an announcement channel."""
+    chat = (await db.execute(select(Chat).where(Chat.id == chat_id))).scalar_one_or_none()
+    if not chat or chat.type != "channel":
+        raise HTTPException(status_code=400, detail="Это не канал объявлений")
+    existing = set((await db.execute(select(ChatMember.user_id).where(ChatMember.chat_id == chat_id))).scalars().all())
+    rows = (await db.execute(select(User).where(User.is_active == True))).scalars().all()  # noqa: E712
+    added = []
+    for u in rows:
+        if u.id in existing:
+            continue
+        db.add(ChatMember(chat_id=chat_id, user_id=u.id, is_admin=(u.role == "admin"), can_post=(u.role == "admin")))
+        added.append(u)
+    if added:
+        await db.commit()
+        manager.forget_members(chat_id)
+        slim = {
+            "id": chat.id,
+            "type": "channel",
+            "name": chat.name,
+            "description": chat.description or "",
+            "avatar_color": chat.avatar_color,
+            "avatar_url": chat.avatar_url or "",
+            "created_by": chat.created_by,
+            "members": [],
+            "member_count": len(existing) + len(added),
+            "unread": 0,
+            "is_muted": False,
+        }
+        manager.spawn(manager.send_to_users(
+            [u.id for u in added],
+            {"type": "chat_created", "chat_id": chat.id, "chat": slim},
+        ))
+    await _log(db, admin, "sync_announcement", f"chat={chat_id} added={len(added)}")
+    return {"ok": True, "added": len(added), "members": len(existing) + len(added)}
+
+
+class AdminPublisherRequest(BaseModel):
+    user_id: int
+    can_post: bool = True
+
+
+@router.get("/chats/{chat_id}/publishers")
+async def list_channel_publishers(
+    chat_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Who may write in an announcement channel (not the full 130-member roster)."""
+    chat = (await db.execute(select(Chat).where(Chat.id == chat_id))).scalar_one_or_none()
+    if not chat or chat.type != "channel":
+        raise HTTPException(status_code=400, detail="Это не канал объявлений")
+    rows = (
+        await db.execute(
+            select(User, ChatMember)
+            .join(ChatMember, ChatMember.user_id == User.id)
+            .where(
+                ChatMember.chat_id == chat_id,
+                or_(ChatMember.can_post == True, ChatMember.is_admin == True),  # noqa: E712
+            )
+            .order_by(User.full_name, User.username)
+        )
+    ).all()
+    return {
+        "ok": True,
+        "id": chat.id,
+        "name": chat.name,
+        "publishers": [
+            {
+                "id": u.id,
+                "username": u.username,
+                "full_name": u.full_name or u.username,
+                "role": u.role,
+                "avatar_color": u.avatar_color,
+                "locked": u.role == "admin",
+            }
+            for u, _cm in rows
+        ],
+    }
+
+
+@router.post("/chats/{chat_id}/publishers")
+async def set_channel_publisher(
+    chat_id: int,
+    data: AdminPublisherRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Grant or revoke write access for one user. Notifies only that user."""
+    chat = (await db.execute(select(Chat).where(Chat.id == chat_id))).scalar_one_or_none()
+    if not chat or chat.type != "channel":
+        raise HTTPException(status_code=400, detail="Это не канал объявлений")
+    u = (await db.execute(select(User).where(User.id == data.user_id))).scalar_one_or_none()
+    if not u or not u.is_active:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    if u.role == "admin" and not data.can_post:
+        raise HTTPException(status_code=400, detail="Администраторы системы всегда могут писать в канал")
+    cm = (
+        await db.execute(select(ChatMember).where(ChatMember.chat_id == chat_id, ChatMember.user_id == u.id))
+    ).scalar_one_or_none()
+    was_member = cm is not None
+    if cm is None:
+        cm = ChatMember(chat_id=chat_id, user_id=u.id, is_admin=False, can_post=bool(data.can_post))
+        db.add(cm)
+        manager.forget_members(chat_id)
+    else:
+        cm.can_post = bool(data.can_post)
+    await db.commit()
+    if not was_member and data.can_post:
+        slim = {
+            "id": chat.id,
+            "type": "channel",
+            "name": chat.name,
+            "description": chat.description or "",
+            "avatar_color": chat.avatar_color,
+            "avatar_url": chat.avatar_url or "",
+            "created_by": chat.created_by,
+            "members": [{"id": u.id, "can_post": True, "is_chat_admin": False}],
+            "member_count": 0,
+            "unread": 0,
+            "is_muted": False,
+        }
+        manager.spawn(manager.send_to_user(u.id, {"type": "chat_created", "chat_id": chat.id, "chat": slim}))
+    else:
+        manager.spawn(manager.send_to_user(u.id, {
+            "type": "chat_updated",
+            "chat_id": chat.id,
+            "can_post": bool(data.can_post or cm.is_admin or u.role == "admin"),
+        }))
+    await _log(db, admin, "set_publisher", f"chat={chat_id} user={u.username} can_post={bool(data.can_post)}")
+    return {"ok": True, "user_id": u.id, "can_post": bool(cm.can_post)}
 
 
 @router.get("/chats")

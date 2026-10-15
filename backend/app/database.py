@@ -22,8 +22,8 @@ engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG,
     pool_pre_ping=True,
-    pool_size=20,
-    max_overflow=10,
+    pool_size=40,
+    max_overflow=40,
 )
 
 async_session_maker = async_sessionmaker(
@@ -109,6 +109,7 @@ def _run_light_migrations(connection) -> None:
         "chat_members": {
             "is_muted": "BOOLEAN DEFAULT FALSE",
             "last_read_message_id": "INTEGER DEFAULT 0",
+            "can_post": "BOOLEAN DEFAULT FALSE",
         },
         "calendar_notes": {
             "calendar_id": "INTEGER",
@@ -140,6 +141,9 @@ def _run_light_migrations(connection) -> None:
             if col not in present:
                 connection.execute(text(f'ALTER TABLE {table} ADD COLUMN {col} {ddl}'))
                 logger.info("Migration: added %s.%s", table, col)
+                if table == "chat_members" and col == "can_post":
+                    connection.execute(text("UPDATE chat_members SET can_post = TRUE WHERE is_admin IS TRUE"))
+                    logger.info("Migration: backfilled chat_members.can_post from is_admin")
 
     # ---- performance indexes (idempotent) ----
     # These speed up the hottest queries: chat membership lookups, message

@@ -1,16 +1,21 @@
 """User routes: search, profile, update."""
+import time
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
 from ..models import Group, ManualContact, User
 from ..permissions import get_effective_permissions
-from ..schemas import ManualContactOut, MyPermissionsOut, UserOut, UserUpdate
+from ..schemas import ManualContactOut, MyPermissionsOut, UserLiteOut, UserOut, UserUpdate
 from ..security import get_current_user
 from ..ws_manager import manager
 
 router = APIRouter(prefix="/api/users", tags=["users"])
+
+# Empty-directory cache: 120 logins must not stampede the same SELECT.
+_LITE_CACHE: dict = {"at": 0.0, "rows": None}
+_LITE_TTL = 8.0
 
 
 @router.get("/me/permissions", response_model=MyPermissionsOut)
@@ -69,6 +74,76 @@ async def list_users(
         out.status = manager.get_status(u.id)
         result.append(out)
     return result
+
+
+
+
+@router.get("/count")
+async def users_count(
+    include_self: bool = False,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    n = (await db.execute(select(func.count()).select_from(User).where(User.is_active == True))).scalar() or 0  # noqa: E712
+    if not include_self:
+        n = max(0, int(n) - 1)
+    return {"count": int(n)}
+
+
+@router.get("/lite", response_model=list[UserLiteOut])
+async def list_users_lite(
+    q: str = "",
+    limit: int = 1000,
+    include_self: bool = False,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Directory rows without email/phone/bio/avatars — for group pickers."""
+    limit = max(1, min(limit, 2000))
+    now = time.monotonic()
+    rows = None
+    if not q and _LITE_CACHE["rows"] is not None and (now - _LITE_CACHE["at"]) < _LITE_TTL:
+        rows = _LITE_CACHE["rows"]
+    else:
+        stmt = select(
+            User.id, User.username, User.full_name, User.avatar_color, User.avatar_url,
+            User.email, User.phone, User.title, User.office,
+        ).where(User.is_active == True)  # noqa: E712
+        if q:
+            like = f"%{q}%"
+            stmt = stmt.where(
+                or_(
+                    User.username.ilike(like),
+                    User.full_name.ilike(like),
+                    User.email.ilike(like),
+                    User.phone.ilike(like),
+                    User.title.ilike(like),
+                    User.office.ilike(like),
+                )
+            )
+        stmt = stmt.order_by(User.full_name, User.username).limit(limit)
+        rows = (await db.execute(stmt)).all()
+        if not q:
+            _LITE_CACHE["rows"] = rows
+            _LITE_CACHE["at"] = now
+    if not include_self:
+        rows = [r for r in rows if r.id != user.id]
+    return [
+        UserLiteOut(
+            id=r.id,
+            username=r.username,
+            full_name=r.full_name or "",
+            avatar_color=r.avatar_color or "#3390ec",
+            avatar_url=r.avatar_url or "",
+            email=r.email or "",
+            phone=r.phone or "",
+            title=r.title or "",
+            office=r.office or "",
+            is_online=manager.is_online(r.id),
+            status=manager.get_status(r.id) if manager.is_online(r.id) else "offline",
+        )
+        for r in rows[:limit]
+    ]
 
 
 @router.get("/manual-contacts", response_model=list[ManualContactOut])

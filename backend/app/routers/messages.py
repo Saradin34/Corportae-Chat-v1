@@ -20,7 +20,12 @@ router = APIRouter(prefix="/api/chats/{chat_id}/messages", tags=["messages"])
 
 
 async def _members(db: AsyncSession, chat_id: int) -> list[int]:
-    return list((await db.execute(select(ChatMember.user_id).where(ChatMember.chat_id == chat_id))).scalars().all())
+    cached = manager.cached_members(chat_id)
+    if cached is not None:
+        return cached
+    ids = list((await db.execute(select(ChatMember.user_id).where(ChatMember.chat_id == chat_id))).scalars().all())
+    manager.remember_members(chat_id, ids)
+    return ids
 
 
 async def _ensure_member(db: AsyncSession, chat_id: int, user_id: int) -> ChatMember:
@@ -34,19 +39,23 @@ async def _ensure_member(db: AsyncSession, chat_id: int, user_id: int) -> ChatMe
     return cm
 
 
+def _is_channel_writer(user: User, cm: ChatMember) -> bool:
+    return bool(cm.is_admin or getattr(cm, "can_post", False) or user.role == "admin")
+
+
 async def _ensure_can_post(db: AsyncSession, chat_id: int, user: User, cm: ChatMember | None = None) -> Chat:
     """Validate chat-specific write permissions.
 
-    Channels are announcement-only: ordinary members can read, while channel
-    admins and global application admins can publish.
+    Channels are announcement-only: ordinary members can read. Publishers are
+    designated authors (can_post), channel admins, and global admins.
     """
     chat = (await db.execute(select(Chat).where(Chat.id == chat_id))).scalar_one_or_none()
     if not chat:
         raise HTTPException(status_code=404, detail="Чат не найден")
     if cm is None:
         cm = await _ensure_member(db, chat_id, user.id)
-    if chat.type == "channel" and not cm.is_admin and user.role != "admin":
-        raise HTTPException(status_code=403, detail="В канал могут писать только администраторы")
+    if chat.type == "channel" and not _is_channel_writer(user, cm):
+        raise HTTPException(status_code=403, detail="В канал могут писать только назначенные авторы")
     return chat
 
 
@@ -156,6 +165,80 @@ async def search_messages(
     return [_to_out(m, s, reacts.get(m.id, [])) for m, s in rows]
 
 
+@router.get("/{message_id}/readers")
+async def list_message_readers(
+    chat_id: int,
+    message_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Who has read this message. On-demand for group hover — no 120-member fanout."""
+    await _ensure_member(db, chat_id, user.id)
+    msg = (
+        await db.execute(select(Message).where(Message.id == message_id, Message.chat_id == chat_id))
+    ).scalar_one_or_none()
+    if not msg:
+        raise HTTPException(status_code=404, detail="Сообщение не найдено")
+    base = [
+        ChatMember.chat_id == chat_id,
+        ChatMember.user_id != msg.sender_id,
+        User.is_active == True,  # noqa: E712
+    ]
+    total = (
+        await db.execute(
+            select(func.count()).select_from(ChatMember).join(User, User.id == ChatMember.user_id).where(*base)
+        )
+    ).scalar() or 0
+    read_filter = base + [ChatMember.last_read_message_id >= msg.id]
+    read_count = (
+        await db.execute(
+            select(func.count()).select_from(ChatMember).join(User, User.id == ChatMember.user_id).where(*read_filter)
+        )
+    ).scalar() or 0
+    rows = (
+        await db.execute(
+            select(User)
+            .join(ChatMember, ChatMember.user_id == User.id)
+            .where(*read_filter)
+            .order_by(User.full_name, User.username)
+            .limit(40)
+        )
+    ).scalars().all()
+    return {
+        "ok": True,
+        "message_id": msg.id,
+        "read": int(read_count),
+        "total": int(total),
+        "readers": [
+            {
+                "id": u.id,
+                "username": u.username,
+                "full_name": u.full_name or u.username,
+                "avatar_color": u.avatar_color or "#3390ec",
+                "avatar_url": u.avatar_url or "",
+            }
+            for u in rows
+        ],
+    }
+
+
+@router.get("/by-id/{message_id}", response_model=MessageOut)
+async def get_message(chat_id: int, message_id: int, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    await _ensure_member(db, chat_id, user.id)
+    row = (
+        await db.execute(
+            select(Message, User).join(User, User.id == Message.sender_id).where(
+                Message.chat_id == chat_id, Message.id == message_id, Message.is_deleted == False  # noqa: E712
+            )
+        )
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Сообщение не найдено")
+    msg, sender = row
+    reacts = (await _reactions_for(db, [msg.id], user.id)).get(msg.id, [])
+    return _to_out(msg, sender, reacts)
+
+
 @router.post("", response_model=MessageOut)
 async def send_message(
     chat_id: int,
@@ -205,7 +288,7 @@ async def send_message(
     await db.commit()
     await db.refresh(msg)
     out = _to_out(msg, user, [])
-    await manager.send_to_users(await _members(db, chat_id), {"type": "new_message", "message": out.model_dump(mode="json")})
+    manager.spawn(manager.send_to_users(await _members(db, chat_id), {"type": "new_message", "message": out.model_dump(mode="json")}))
     return out
 
 
@@ -245,7 +328,7 @@ async def forward_message(
     await db.commit()
     await db.refresh(fwd)
     out = _to_out(fwd, user, [])
-    await manager.send_to_users(await _members(db, data.to_chat_id), {"type": "new_message", "message": out.model_dump(mode="json")})
+    manager.spawn(manager.send_to_users(await _members(db, data.to_chat_id), {"type": "new_message", "message": out.model_dump(mode="json")}))
     return out
 
 
@@ -272,7 +355,7 @@ async def edit_message(
     await db.refresh(msg)
     reacts = (await _reactions_for(db, [msg.id], user.id)).get(msg.id, [])
     out = _to_out(msg, user, reacts)
-    await manager.send_to_users(await _members(db, chat_id), {"type": "edit_message", "message": out.model_dump(mode="json")})
+    manager.spawn(manager.send_to_users(await _members(db, chat_id), {"type": "edit_message", "message": out.model_dump(mode="json")}))
     return out
 
 
@@ -288,8 +371,8 @@ async def delete_message(
         raise HTTPException(status_code=404, detail="Сообщение не найдено")
     cm = await _ensure_member(db, chat_id, user.id)
     chat = (await db.execute(select(Chat).where(Chat.id == chat_id))).scalar_one_or_none()
-    if chat and chat.type == "channel" and not cm.is_admin and user.role != "admin":
-        raise HTTPException(status_code=403, detail="В канал могут писать только администраторы")
+    if chat and chat.type == "channel" and not _is_channel_writer(user, cm):
+        raise HTTPException(status_code=403, detail="В канал могут писать только назначенные авторы")
     if msg.sender_id != user.id and user.role != "admin":
         raise HTTPException(status_code=403, detail="Нет прав на удаление")
     if msg.sender_id == user.id and user.role != "admin" and not (await get_effective_permissions(db, user))["can_delete_own"]:
@@ -299,7 +382,7 @@ async def delete_message(
     # replies to this message are set NULL by FK ondelete.
     await db.delete(msg)
     await db.commit()
-    await manager.send_to_users(await _members(db, chat_id), {"type": "delete_message", "chat_id": chat_id, "message_id": message_id, "hard": True})
+    manager.spawn(manager.send_to_users(await _members(db, chat_id), {"type": "delete_message", "chat_id": chat_id, "message_id": message_id, "hard": True}))
     return {"ok": True, "deleted_for_all": True}
 
 
@@ -323,7 +406,7 @@ async def toggle_pin(
         raise HTTPException(status_code=404, detail="Сообщение не найдено")
     msg.is_pinned = not msg.is_pinned
     await db.commit()
-    await manager.send_to_users(await _members(db, chat_id), {"type": "pin_changed", "chat_id": chat_id, "message_id": message_id, "is_pinned": msg.is_pinned})
+    manager.spawn(manager.send_to_users(await _members(db, chat_id), {"type": "pin_changed", "chat_id": chat_id, "message_id": message_id, "is_pinned": msg.is_pinned}))
     return {"ok": True, "is_pinned": msg.is_pinned}
 
 
@@ -363,5 +446,5 @@ async def react(
         "message_id": message_id,
         "reactions": [r.model_dump() for r in reacts],
     }
-    await manager.send_to_users(await _members(db, chat_id), payload)
+    manager.spawn(manager.send_to_users(await _members(db, chat_id), payload))
     return {"ok": True, "reactions": [r.model_dump() for r in reacts]}

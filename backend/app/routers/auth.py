@@ -64,6 +64,8 @@ async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
     db.add(user)
     await db.commit()
     await db.refresh(user)
+    from .chats import subscribe_user_to_announcement_channels
+    await subscribe_user_to_announcement_channels(db, user)
 
     token = create_access_token(user.id)
     return TokenResponse(access_token=token, user=UserOut.model_validate(user))
@@ -113,6 +115,8 @@ async def _ldap_login(data: LoginRequest, db: AsyncSession) -> TokenResponse:
         await db.commit()
         await db.refresh(user)
         logger.info("JIT-provisioned AD user '%s' role=%s", user.username, mapped_role)
+        from .chats import subscribe_user_to_announcement_channels
+        await subscribe_user_to_announcement_channels(db, user)
     else:
         # keep profile/role in sync with AD on each login
         changed = False
@@ -136,9 +140,10 @@ async def _ldap_login(data: LoginRequest, db: AsyncSession) -> TokenResponse:
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Аккаунт заблокирован")
 
-    # NOTE: AD users are NOT auto-added to any chats or groups on login.
-    # They start with no chats and either create chats themselves or get added
-    # by others. (Group/department auto-join from AD was intentionally removed.)
+    # Department/group auto-join from AD stays off. Announcement channels
+    # (type=channel) are company-wide: every active user must see them.
+    from .chats import subscribe_user_to_announcement_channels
+    await subscribe_user_to_announcement_channels(db, user)
 
     token = create_access_token(user.id)
     return TokenResponse(access_token=token, user=UserOut.model_validate(user))
@@ -173,6 +178,9 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Неверное имя пользователя или пароль")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Аккаунт заблокирован")
+
+    from .chats import subscribe_user_to_announcement_channels
+    await subscribe_user_to_announcement_channels(db, user)
 
     token = create_access_token(user.id)
     return TokenResponse(access_token=token, user=UserOut.model_validate(user))
@@ -237,6 +245,8 @@ async def _complete_sso_login(username: str, db: AsyncSession) -> TokenResponse:
         await db.commit()
         await db.refresh(user)
         logger.info("JIT-provisioned SSO user '%s' role=%s", username, role)
+        from .chats import subscribe_user_to_announcement_channels
+        await subscribe_user_to_announcement_channels(db, user)
     else:
         changed = False
         if user.auth_source not in ("sso", "ldap"):
@@ -254,6 +264,9 @@ async def _complete_sso_login(username: str, db: AsyncSession) -> TokenResponse:
 
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Аккаунт заблокирован")
+
+    from .chats import subscribe_user_to_announcement_channels
+    await subscribe_user_to_announcement_channels(db, user)
 
     token = create_access_token(user.id)
     return TokenResponse(access_token=token, user=UserOut.model_validate(user))

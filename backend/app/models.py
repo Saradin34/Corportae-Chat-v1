@@ -157,6 +157,9 @@ class ChatMember(Base):
     chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"), index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Announcement channels: who may publish. Independent of is_admin so a
+    # writer does not also get member-management rights.
+    can_post: Mapped[bool] = mapped_column(Boolean, default=False)
     is_muted: Mapped[bool] = mapped_column(Boolean, default=False)
     last_read_message_id: Mapped[int] = mapped_column(Integer, default=0)
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

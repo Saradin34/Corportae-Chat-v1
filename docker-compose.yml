@@ -136,7 +136,7 @@ services:
       context: .
       dockerfile: nginx/Dockerfile
       args:
-        CACHEBUST: 1
+        CACHEBUST: 52
     container_name: cc_nginx
     restart: unless-stopped
     ports:

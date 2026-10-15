@@ -129,6 +129,8 @@
     me: () => request("GET", "/auth/me"),
     // users
     searchUsers: (q, limit) => request("GET", "/users?q=" + encodeURIComponent(q || "") + "&limit=" + (limit || 1000)),
+    searchUsersLite: (q, limit) => request("GET", "/users/lite?q=" + encodeURIComponent(q || "") + "&limit=" + (limit || 2000)),
+    usersCount: () => request("GET", "/users/count"),
     listUsers: (q, limit) => request("GET", "/users?q=" + encodeURIComponent(q || "") + "&limit=" + (limit || 1000)),
     manualContacts: (q, limit) => request("GET", "/users/manual-contacts?q=" + encodeURIComponent(q || "") + "&limit=" + (limit || 1000)),
     myPermissions: () => request("GET", "/users/me/permissions"),
@@ -174,7 +176,8 @@
     updateChat: (id, d) => request("PATCH", "/chats/" + id, d),
     deleteChat: (id) => request("DELETE", "/chats/" + id),
     discardEmptyChat: (id) => request("POST", "/chats/" + id + "/discard-empty"),
-    addMembers: (id, ids) => request("POST", "/chats/" + id + "/members", { member_ids: ids }),
+    addMembers: (id, ids, addAll) => request("POST", "/chats/" + id + "/members", { member_ids: ids || [], add_all: !!addAll }),
+    listChatMembers: (id, offset, limit) => request("GET", "/chats/" + id + "/members?offset=" + (offset || 0) + "&limit=" + (limit || 200)),
     removeMember: (id, mid) => request("DELETE", "/chats/" + id + "/members/" + mid),
     toggleMemberAdmin: (id, mid) => request("POST", "/chats/" + id + "/members/" + mid + "/admin"),
     toggleMute: (id) => request("POST", "/chats/" + id + "/mute"),
@@ -188,6 +191,8 @@
       return request("GET", "/chats/" + chatId + "/messages" + qs);
     },
     sendMessage: (chatId, d) => request("POST", "/chats/" + chatId + "/messages", d),
+    getMessage: (chatId, id) => request("GET", "/chats/" + chatId + "/messages/by-id/" + id),
+    messageReaders: (chatId, mid) => request("GET", "/chats/" + chatId + "/messages/" + mid + "/readers"),
     editMessage: (chatId, mid, d) => request("PATCH", "/chats/" + chatId + "/messages/" + mid, d),
     deleteMessage: (chatId, mid) => request("DELETE", "/chats/" + chatId + "/messages/" + mid),
     reactMessage: (chatId, mid, emoji) => request("POST", "/chats/" + chatId + "/messages/" + mid + "/react", { emoji }),
@@ -217,6 +222,10 @@
     adminResetPassword: (id, pwd) => request("POST", "/admin/users/" + id + "/reset-password?new_password=" + encodeURIComponent(pwd)),
     adminDeleteUser: (id) => request("DELETE", "/admin/users/" + id),
     adminChats: () => request("GET", "/admin/chats"),
+    adminCreateAnnouncement: (d) => request("POST", "/admin/chats/announcement", d),
+    adminSyncAnnouncement: (id) => request("POST", "/admin/chats/" + id + "/sync-all"),
+    adminChannelPublishers: (id) => request("GET", "/admin/chats/" + id + "/publishers"),
+    adminSetPublisher: (id, userId, canPost) => request("POST", "/admin/chats/" + id + "/publishers", { user_id: userId, can_post: !!canPost }),
     adminDeleteChat: (id) => request("DELETE", "/admin/chats/" + id),
     adminAudit: () => request("GET", "/admin/audit"),
     adminBroadcast: (text) => request("POST", "/admin/broadcast", { text }),
@@ -232,6 +241,7 @@
     // admin: server settings
     adminGetSettings: () => request("GET", "/admin/settings"),
     adminUpdateSettings: (d) => request("PATCH", "/admin/settings", d),
+    appConfig: () => request("GET", "/config"),
   };
 
   window.API = API;
@@ -242,6 +252,14 @@
     return /cannot (set|read|get)|null|undefined|innerhtml|queryselector|addeventlistener|classlist|is not a function|failed to execute|script error|resizeobserver/.test(m);
   }
 
+  window.__notifyDurationMs = 5000;
+  window.loadAppConfig = async function () {
+    try {
+      const d = await request("GET", "/config");
+      const sec = Math.min(30, Math.max(1, parseInt(d && d.notify_duration_sec, 10) || 5));
+      window.__notifyDurationMs = sec * 1000;
+    } catch (e) {}
+  };
   window.toast = function (message, type) {
     // Do not show raw JS/system exceptions to end users. They are logged for
     // developers but hidden from UI; real API/business errors still appear.
@@ -255,11 +273,12 @@
     el.className = "toast" + (type ? " " + type : "");
     el.textContent = message;
     c.appendChild(el);
+    const ms = Math.max(1000, Number(window.__notifyDurationMs) || 5000);
     setTimeout(() => {
       el.style.transition = "opacity .3s";
       el.style.opacity = "0";
       setTimeout(() => el.remove(), 300);
-    }, 3000);
+    }, ms);
   };
 
   window.addEventListener("error", (e) => {

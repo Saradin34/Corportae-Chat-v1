@@ -141,7 +141,9 @@ a { color: var(--tg-blue); text-decoration: none; }
   font-size: 14px; opacity: .5;
 }
 
-.chat-list { flex: 1; overflow-y: auto; }
+.chat-list { flex: 1; overflow-y: scroll; scrollbar-gutter: stable; overflow-anchor: none; }
+.chat-item { min-height: 72px; }
+.unread-badge.is-empty { visibility: hidden; }
 .chat-item {
   display: flex; align-items: center; gap: 12px; padding: 10px 14px; cursor: pointer;
   transition: background .12s; position: relative;
@@ -490,6 +492,9 @@ body.hide-right-sidebar .right-sidebar { display: none !important; }
 }
 .toast.error { background: #e74c3c; }
 .toast.success { background: #27ae60; }
+.toast.message { background: #2563eb; }
+.toast.call { background: #16a34a; }
+.toast.missed { background: #ea580c; }
 @keyframes toastIn { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 
 /* ============ NEW: unread badge ============ */
@@ -6417,46 +6422,56 @@ body.chat-bg-doodleCats .chat-area::before {
   color: #22c55e !important;
 }
 
-/* Clear buttons for left/right sidebar search fields */
+/* Clear buttons for left/right sidebar search fields (v1.0) */
 .search-box input.has-clear-btn,
+.rs-search-wrap .rs-search.has-clear-btn,
 .rs-search-box .rs-search.has-clear-btn {
   padding-right: 42px !important;
 }
+.rs-search-wrap {
+  position: relative !important;
+  width: 100% !important;
+}
 .search-clear-btn {
   position: absolute !important;
-  right: 8px !important;
+  right: 10px !important;
   top: 50% !important;
-  transform: translateY(-50%) scale(.92) !important;
-  width: 24px !important;
-  height: 24px !important;
-  min-width: 24px !important;
-  min-height: 24px !important;
-  border-radius: 50% !important;
+  transform: translateY(-50%) !important;
+  width: 18px !important;
+  height: 18px !important;
+  min-width: 18px !important;
+  min-height: 18px !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
   display: inline-flex !important;
   align-items: center !important;
   justify-content: center !important;
-  font-size: 18px !important;
+  font-size: 20px !important;
   line-height: 1 !important;
-  font-weight: 700 !important;
+  font-weight: 400 !important;
   color: var(--text-secondary) !important;
-  background: color-mix(in srgb, var(--text-secondary) 12%, transparent) !important;
+  background: transparent !important;
+  box-shadow: none !important;
   opacity: 0 !important;
   pointer-events: none !important;
-  transition: opacity .14s ease, transform .14s ease, background .14s ease, color .14s ease !important;
+  transition: opacity .14s ease, color .14s ease !important;
   z-index: 3 !important;
 }
 .search-clear-btn.show {
-  opacity: .86 !important;
+  opacity: .7 !important;
   pointer-events: auto !important;
-  transform: translateY(-50%) scale(1) !important;
 }
-.search-clear-btn:hover {
-  opacity: 1 !important;
-  color: #fff !important;
-  background: var(--tg-blue) !important;
-}
+.search-clear-btn:hover,
+.search-clear-btn:focus,
 .search-clear-btn:active {
-  transform: translateY(-50%) scale(.92) !important;
+  opacity: 1 !important;
+  color: var(--text) !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+  transform: translateY(-50%) !important;
 }
 .rs-search-box {
   width: 100% !important;
@@ -6466,43 +6481,6 @@ body.chat-bg-doodleCats .chat-area::before {
 }
 .rs-search-box .rs-search {
   padding-left: 38px !important;
-}
-
-/* Final right sidebar presence indicators:
-   online = green, away = orange, DND = red, offline = no dot. */
-.right-sidebar .presence-online .online-dot,
-.right-sidebar .avatar .online-dot.online,
-.right-sidebar .avatar .online-dot:not(.away):not(.dnd) {
-  display: block !important;
-  background: #22c55e !important;
-  border: 2px solid var(--bg) !important;
-  box-shadow: 0 0 0 1px rgba(34,197,94,.95), 0 0 10px rgba(34,197,94,.75) !important;
-  opacity: 1 !important;
-}
-.right-sidebar .presence-away .online-dot,
-.right-sidebar .avatar .online-dot.away {
-  display: block !important;
-  background: #ff9f1c !important;
-  border: 2px solid var(--bg) !important;
-  box-shadow: 0 0 0 1px rgba(255,159,28,.95), 0 0 10px rgba(255,159,28,.75) !important;
-  opacity: 1 !important;
-}
-.right-sidebar .presence-dnd .online-dot,
-.right-sidebar .avatar .online-dot.dnd {
-  display: block !important;
-  background: #ff2d2d !important;
-  border: 2px solid var(--bg) !important;
-  box-shadow: 0 0 0 1px rgba(255,45,45,.95), 0 0 12px rgba(255,45,45,.8) !important;
-  opacity: 1 !important;
-}
-.right-sidebar .presence-offline .online-dot,
-.right-sidebar .rs-user.offline .online-dot {
-  display: none !important;
-}
-.right-sidebar .rs-section-offline {
-  margin-top: 8px !important;
-  padding-top: 14px !important;
-  border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent) !important;
 }
 
 /* Final left sidebar/chat list presence indicators:
@@ -6541,213 +6519,426 @@ body.chat-bg-doodleCats .chat-area::before {
   display: none !important;
 }
 
-/* HARD FIX: right sidebar status dots are drawn by the row status class,
-   not only by the inner span. This guarantees away/DND users always show
-   the correct indicator even if old/cached markup missed the .online-dot span. */
-.right-sidebar .rs-user .avatar::after {
-  content: none !important;
-}
-.right-sidebar .rs-user.presence-online .avatar::after,
-.right-sidebar .rs-user.presence-away .avatar::after,
-.right-sidebar .rs-user.presence-dnd .avatar::after {
-  content: "" !important;
-  position: absolute !important;
-  right: 1px !important;
-  bottom: 1px !important;
-  width: 11px !important;
-  height: 11px !important;
-  border-radius: 50% !important;
-  border: 2px solid var(--bg) !important;
-  z-index: 5 !important;
-  opacity: 1 !important;
-}
-.right-sidebar .rs-user.presence-online .avatar::after {
-  background: #22c55e !important;
-  box-shadow: 0 0 0 1px rgba(34,197,94,.95), 0 0 10px rgba(34,197,94,.75) !important;
-}
-.right-sidebar .rs-user.presence-away .avatar::after {
-  background: #ff9f1c !important;
-  box-shadow: 0 0 0 1px rgba(255,159,28,.95), 0 0 10px rgba(255,159,28,.75) !important;
-}
-.right-sidebar .rs-user.presence-dnd .avatar::after {
-  background: #ff2d2d !important;
-  box-shadow: 0 0 0 1px rgba(255,45,45,.95), 0 0 12px rgba(255,45,45,.8) !important;
-}
-.right-sidebar .rs-user.presence-offline .avatar::after,
-.right-sidebar .rs-user.offline .avatar::after {
-  content: none !important;
-  display: none !important;
-}
-
-/* ABSOLUTE FIX for right sidebar: use a separate status dot element.
-   This is independent from .online-dot and cannot be hidden by old avatar dot rules. */
-.right-sidebar .rs-avatar-wrap {
-  position: relative !important;
-  display: inline-flex !important;
-  flex: 0 0 auto !important;
-  width: 38px !important;
-  height: 38px !important;
-}
-.right-sidebar .rs-avatar-wrap .avatar,
-.right-sidebar .rs-avatar-wrap .avatar.sm {
-  width: 38px !important;
-  height: 38px !important;
-  min-width: 38px !important;
-}
-.right-sidebar .rs-status-dot {
-  position: absolute !important;
-  right: -1px !important;
-  bottom: -1px !important;
-  width: 12px !important;
-  height: 12px !important;
-  border-radius: 50% !important;
-  border: 2px solid var(--bg) !important;
-  z-index: 20 !important;
-  display: block !important;
-  opacity: 1 !important;
-  pointer-events: none !important;
-}
-.right-sidebar .rs-status-dot.online {
-  background: #22c55e !important;
-  box-shadow: 0 0 0 1px rgba(34,197,94,.95), 0 0 10px rgba(34,197,94,.75) !important;
-}
-.right-sidebar .rs-status-dot.away {
-  background: #ff9f1c !important;
-  box-shadow: 0 0 0 1px rgba(255,159,28,.95), 0 0 10px rgba(255,159,28,.75) !important;
-}
-.right-sidebar .rs-status-dot.dnd {
-  background: #ff2d2d !important;
-  box-shadow: 0 0 0 1px rgba(255,45,45,.95), 0 0 12px rgba(255,45,45,.8) !important;
-}
-.right-sidebar .rs-user.offline .rs-status-dot,
-.right-sidebar .rs-user.presence-offline .rs-status-dot {
-  display: none !important;
-}
-
-/* Revert right sidebar to previous simple layout/status rendering. */
-.right-sidebar .rs-avatar-wrap {
-  display: contents !important;
-}
-.right-sidebar .rs-status-dot {
-  display: none !important;
-}
-.right-sidebar .rs-user .avatar::after {
-  content: none !important;
-  display: none !important;
-}
-.right-sidebar .rs-section-offline {
-  margin-top: 0 !important;
-  padding-top: 10px !important;
-  border-top: none !important;
-}
+/* v1.2: search field padding for clear button */
 .right-sidebar .rs-search {
   width: 100% !important;
   padding: 8px 12px !important;
 }
+.right-sidebar .rs-search.has-clear-btn {
+  padding-right: 36px !important;
+}
 .right-sidebar .search-clear-btn {
-  display: none !important;
+  display: inline-flex !important;
 }
 
-/* FINAL right sidebar status dots, same logic as left sidebar, without layout changes.
-   В сети = зелёный, Нет на месте = оранжевый, Не беспокоить = красный,
-   Не в сети = без кружка. */
-.right-sidebar .rs-user .avatar {
-  position: relative !important;
-  overflow: visible !important;
-}
-.right-sidebar .rs-user .avatar::after {
-  content: none !important;
-  display: none !important;
-}
-.right-sidebar .rs-user.presence-online:not(.offline) .avatar::after,
-.right-sidebar .rs-user.presence-away:not(.offline) .avatar::after,
-.right-sidebar .rs-user.presence-dnd:not(.offline) .avatar::after {
-  content: "" !important;
+/* Final left sidebar/chat list presence indicators:
+   online = green, away = orange, DND = red, offline = no dot. */
+.sidebar .chat-item.presence-online .online-dot,
+.sidebar .presence-online .online-dot,
+.sidebar .avatar .online-dot.online,
+.sidebar .avatar .online-dot:not(.away):not(.dnd) {
   display: block !important;
-  position: absolute !important;
-  right: -1px !important;
-  bottom: -1px !important;
-  width: 12px !important;
-  height: 12px !important;
-  border-radius: 50% !important;
-  border: 2px solid var(--bg) !important;
-  z-index: 30 !important;
-  opacity: 1 !important;
-  pointer-events: none !important;
-}
-.right-sidebar .rs-user.presence-online:not(.offline) .avatar::after {
   background: #22c55e !important;
+  border: 2px solid var(--bg) !important;
   box-shadow: 0 0 0 1px rgba(34,197,94,.95), 0 0 10px rgba(34,197,94,.75) !important;
+  opacity: 1 !important;
 }
-.right-sidebar .rs-user.presence-away:not(.offline) .avatar::after {
+.sidebar .chat-item.presence-away .online-dot,
+.sidebar .presence-away .online-dot,
+.sidebar .avatar .online-dot.away {
+  display: block !important;
   background: #ff9f1c !important;
+  border: 2px solid var(--bg) !important;
   box-shadow: 0 0 0 1px rgba(255,159,28,.95), 0 0 10px rgba(255,159,28,.75) !important;
+  opacity: 1 !important;
 }
-.right-sidebar .rs-user.presence-dnd:not(.offline) .avatar::after {
+.sidebar .chat-item.presence-dnd .online-dot,
+.sidebar .presence-dnd .online-dot,
+.sidebar .avatar .online-dot.dnd {
+  display: block !important;
   background: #ff2d2d !important;
+  border: 2px solid var(--bg) !important;
   box-shadow: 0 0 0 1px rgba(255,45,45,.95), 0 0 12px rgba(255,45,45,.8) !important;
+  opacity: 1 !important;
 }
-.right-sidebar .rs-user.presence-offline .avatar::after,
-.right-sidebar .rs-user.offline .avatar::after {
-  content: none !important;
+.sidebar .chat-item.presence-offline .online-dot,
+.sidebar .presence-offline .online-dot,
+.sidebar .chat-item.saved-chat .online-dot {
   display: none !important;
 }
 
-/* FINAL FIX right sidebar dot size: no enlarged pseudo dots, fixed compact indicators. */
-.right-sidebar .rs-user .avatar,
-.right-sidebar .rs-user .avatar.sm {
-  position: relative !important;
-  overflow: visible !important;
-  flex: 0 0 38px !important;
-  width: 38px !important;
-  height: 38px !important;
-  min-width: 38px !important;
-  min-height: 38px !important;
-  max-width: 38px !important;
-  max-height: 38px !important;
-  font-size: 15px !important;
+/* Lightbox zoom */
+.lightbox .lb-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  cursor: default;
 }
-.right-sidebar .rs-user .avatar::after {
-  content: none !important;
-  display: none !important;
+.lightbox .lb-stage img {
+  max-width: 92vw;
+  max-height: 88vh;
+  border-radius: 8px;
+  box-shadow: 0 10px 50px rgba(0,0,0,.5);
+  transform-origin: center center;
+  transition: transform .08s ease-out;
+  user-select: none;
+  -webkit-user-drag: none;
 }
-.right-sidebar .rs-user .online-dot {
-  position: absolute !important;
-  right: -1px !important;
-  bottom: -1px !important;
-  width: 9px !important;
-  height: 9px !important;
-  min-width: 9px !important;
-  min-height: 9px !important;
-  max-width: 9px !important;
-  max-height: 9px !important;
-  border-radius: 50% !important;
-  border: 2px solid var(--bg) !important;
-  box-sizing: content-box !important;
-  z-index: 8 !important;
-  opacity: 1 !important;
+.lb-zoom-tools {
+  position: absolute;
+  left: 50%;
+  bottom: 58px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(0,0,0,.55);
+  color: #fff;
+  z-index: 5;
+}
+.lb-zoom-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(255,255,255,.16);
+  color: #fff;
+  font-size: 20px;
+  line-height: 1;
+}
+.lb-zoom-btn:hover { background: rgba(255,255,255,.3); }
+.lb-zoom-val { min-width: 48px; text-align: center; font-size: 13px; font-weight: 600; }
+
+.user-pick-toolbar { display: flex; align-items: center; margin: 0 0 8px; }
+.user-pick-toolbar .btn-secondary { width: 100%; }
+
+#user-pick-list, #am-list {
+  max-height: 360px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.user-pick-item { min-height: 48px; box-sizing: border-box; }
+.pick-spacer { pointer-events: none; }
+
+.rs-user, .user-pick-item { content-visibility: auto; contain-intrinsic-size: 0 58px; }
+
+.chat-filter span[hidden] { display: none; }
+.notify-duration-row { align-items: flex-start !important; }
+.notify-duration-ctrl { display: flex; align-items: center; gap: 12px; min-width: 220px; }
+.notify-duration-ctrl input[type="range"] { flex: 1; min-width: 140px; accent-color: var(--tg-blue); }
+.notify-duration-ctrl b { min-width: 52px; text-align: right; color: var(--tg-blue); }
+
+
+/* Left chat list: rows never grow when a message arrives or a chat is opened. */
+.sidebar .chat-item,
+.sidebar .chat-item.active,
+.sidebar .chat-item:hover {
+  height: 60px !important;
+  min-height: 60px !important;
+  max-height: 60px !important;
+  margin: 0 0 4px !important;
+  padding: 7px 9px !important;
+  box-sizing: border-box !important;
+  overflow: hidden !important;
   transform: none !important;
+  align-items: center !important;
 }
-.right-sidebar .rs-user.presence-online:not(.offline) .online-dot,
-.right-sidebar .rs-user:not(.offline) .online-dot.online,
-.right-sidebar .rs-user:not(.offline) .online-dot:not(.away):not(.dnd) {
+.sidebar .chat-item .avatar,
+.sidebar .chat-item.active .avatar {
+  width: 43px !important;
+  height: 43px !important;
+  min-width: 43px !important;
+  max-width: 43px !important;
+}
+.sidebar .chat-meta {
+  min-width: 0 !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+  justify-content: center !important;
+}
+.sidebar .chat-top {
+  margin-bottom: 0 !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+}
+.sidebar .chat-bottom {
+  display: flex !important;
+  align-items: center !important;
+  min-width: 0 !important;
+  height: 16px !important;
+  max-height: 16px !important;
+  overflow: hidden !important;
+  margin-top: 1px !important;
+}
+.sidebar .chat-last {
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+  max-height: 16px !important;
+  line-height: 16px !important;
+  margin-top: 0 !important;
+}
+.sidebar .unread-badge {
+  flex: 0 0 auto !important;
+  min-width: 18px !important;
+  width: auto !important;
+  height: 16px !important;
+  max-height: 16px !important;
+}
+.sidebar .chat-check {
+  display: inline !important;
+  vertical-align: baseline !important;
+}
+.sidebar .chat-list {
+  overflow-anchor: none !important;
+}
+
+
+.drop-overlay {
+  align-items: stretch !important;
+  justify-content: stretch !important;
+  padding: 10px !important;
+}
+.drop-split {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 10px;
+  min-height: 0;
+  pointer-events: auto;
+}
+.drop-zone {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--tg-blue);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg) 78%, var(--tg-blue) 22%);
+  color: var(--tg-blue);
+  pointer-events: auto;
+  transition: background .12s, border-color .12s, transform .12s;
+}
+.drop-zone[data-drop="path"] {
+  border-color: #0f766e;
+  color: #0f766e;
+  background: color-mix(in srgb, var(--bg) 78%, #0f766e 22%);
+}
+.drop-zone.hot {
+  border-style: solid;
+  transform: scale(1.01);
+  box-shadow: inset 0 0 0 2px currentColor;
+}
+.drop-sub { font-size: 13px; font-weight: 600; opacity: .85; margin-top: 4px; text-align: center; padding: 0 12px; }
+.msg-reply { cursor: pointer; }
+.msg-reply:hover { filter: brightness(1.08); }
+.msg-jump-hl {
+  animation: msgJump 1.6s ease;
+  border-radius: 12px;
+}
+@keyframes msgJump {
+  0%, 100% { box-shadow: none; }
+  20% { box-shadow: 0 0 0 6px rgba(51,144,236,.35); }
+}
+.attach-chooser {
+  position: fixed;
+  z-index: 90;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0,0,0,.18);
+  padding: 6px;
+  min-width: 250px;
+}
+.attach-chooser button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 8px;
+  text-align: left;
+  background: transparent;
+  color: var(--text);
+}
+.attach-chooser button span { font-size: 12px; color: var(--text-secondary); font-weight: 500; }
+.attach-chooser button:hover { background: var(--bg-hover); }
+.path-ask {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 0 4px;
+}
+.path-ask input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1.5px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.drop-overlay {
+  z-index: 40 !important;
+  pointer-events: auto !important;
+}
+.composer { position: relative; z-index: 2; }
+.drop-overlay.show ~ .composer,
+.chat-area .drop-overlay.show { z-index: 40 !important; }
+
+
+/* v4.5: «не на месте» = filled orange disc for EVERY away user (left + right). */
+.rs-user, .user-pick-item {
+  content-visibility: visible !important;
+}
+
+html body .online-dot.away,
+html body .avatar .online-dot.away,
+html body .presence-away .online-dot,
+html body .sidebar .chat-item.presence-away .online-dot,
+html body .sidebar .chat-item.presence-away .avatar .online-dot,
+html body .sidebar .presence-away .online-dot,
+html body .sidebar .avatar .online-dot.away,
+html body .right-sidebar .online-dot.away,
+html body .right-sidebar .rs-user .online-dot.away,
+html body .right-sidebar .rs-user.presence-away .online-dot,
+html body .right-sidebar .avatar .online-dot.away,
+html body .chat-header .online-dot.away,
+html body .contact-row.presence-away .online-dot,
+html body .org-member.presence-away .online-dot {
   display: block !important;
+  background: #f97316 !important;
+  background-color: #f97316 !important;
+  background-image: none !important;
+  border: 2px solid var(--bg) !important;
+  box-shadow: 0 0 0 1px rgba(249, 115, 22, .95), 0 0 10px rgba(249, 115, 22, .75) !important;
+  opacity: 1 !important;
+}
+
+html body .online-dot.online,
+html body .avatar .online-dot.online,
+html body .presence-online .online-dot,
+html body .sidebar .chat-item.presence-online .online-dot,
+html body .right-sidebar .rs-user.presence-online .online-dot {
   background: #22c55e !important;
-  box-shadow: 0 0 0 1px rgba(34,197,94,.9), 0 0 7px rgba(34,197,94,.58) !important;
+  background-color: #22c55e !important;
+  border: 2px solid var(--bg) !important;
+  box-shadow: 0 0 0 1px rgba(34, 197, 94, .95), 0 0 10px rgba(34, 197, 94, .75) !important;
+  opacity: 1 !important;
 }
-.right-sidebar .rs-user.presence-away:not(.offline) .online-dot,
-.right-sidebar .rs-user:not(.offline) .online-dot.away {
+
+/* v4.7: «не в сети» = hollow transparent disc, every offline user. */
+html body .online-dot.offline,
+html body .avatar .online-dot.offline,
+html body .avatar .online-dot.offline:not(.away):not(.dnd),
+html body .presence-offline .online-dot,
+html body .rs-user.offline .online-dot,
+html body .right-sidebar .rs-user.offline .online-dot,
+html body .right-sidebar .rs-user.presence-offline .online-dot,
+html body .sidebar .chat-item.presence-offline .online-dot,
+html body .sidebar .presence-offline .online-dot,
+html body .sidebar .avatar .online-dot.offline,
+html body .contact-row.offline .online-dot,
+html body .contact-row.presence-offline .online-dot,
+html body .org-member.presence-offline .online-dot,
+html body .org-member[data-online="0"] .online-dot,
+html body .chat-header .online-dot.offline {
   display: block !important;
-  background: #ff9f1c !important;
-  box-shadow: 0 0 0 1px rgba(255,159,28,.9), 0 0 7px rgba(255,159,28,.58) !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  background-image: none !important;
+  border: 2px solid rgba(226, 232, 240, 0.92) !important;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.45) !important;
+  opacity: 1 !important;
 }
-.right-sidebar .rs-user.presence-dnd:not(.offline) .online-dot,
-.right-sidebar .rs-user:not(.offline) .online-dot.dnd {
-  display: block !important;
-  background: #ff2d2d !important;
-  box-shadow: 0 0 0 1px rgba(255,45,45,.9), 0 0 8px rgba(255,45,45,.62) !important;
+html[data-theme="light"] body .online-dot.offline,
+html[data-theme="light"] body .avatar .online-dot.offline,
+html[data-theme="light"] body .presence-offline .online-dot,
+html[data-theme="light"] body .rs-user.offline .online-dot,
+html[data-theme="light"] body .sidebar .chat-item.presence-offline .online-dot {
+  border: 2px solid rgba(71, 85, 105, 0.9) !important;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.85) !important;
 }
-.right-sidebar .rs-user.offline .online-dot,
-.right-sidebar .rs-user.presence-offline .online-dot {
+html body .sidebar .chat-item.saved-chat .online-dot {
   display: none !important;
 }
+
+/* Read receipts popover (group hover) */
+.readers-pop {
+  position: fixed;
+  z-index: 380;
+  width: 320px;
+  max-width: calc(100vw - 16px);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, .38);
+  overflow: hidden;
+  animation: pop .12s ease;
+  color: var(--text);
+}
+.readers-pop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  font-size: 16px;
+  font-weight: 700;
+  border-bottom: 1px solid var(--border);
+}
+.readers-pop-close {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+.readers-pop-close:hover { background: var(--bg-hover); color: var(--text); }
+.readers-pop-body {
+  padding: 10px 12px 12px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.readers-lead {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0 2px 10px;
+}
+.readers-accent { color: var(--tg-blue); font-weight: 600; }
+.readers-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 4px;
+  border-radius: 10px;
+}
+.readers-name {
+  font-size: 14px;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.readers-more {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 6px 4px 2px;
+}
+.msg-check.has-readers { cursor: pointer; }
+.chat-item.pinned-chat .chat-name { font-weight: 650; }

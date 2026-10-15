@@ -127,6 +127,7 @@
   const ChatPrefs = {
     favKey: "cc_favorite_chats",
     archKey: "cc_archived_chats",
+    pinKey: "cc_pinned_chats",
     getSet(k) { try { return new Set(JSON.parse(localStorage.getItem(k) || "[]")); } catch (e) { return new Set(); } },
     saveSet(k, set) { try { localStorage.setItem(k, JSON.stringify(Array.from(set))); } catch (e) {} },
     favorites() { return this.getSet(this.favKey); },
@@ -135,6 +136,19 @@
     isArchived(id) { return this.archived().has(String(id)); },
     toggleFavorite(id) { const s = this.favorites(); const k = String(id); s.has(k) ? s.delete(k) : s.add(k); this.saveSet(this.favKey, s); },
     toggleArchive(id) { const s = this.archived(); const k = String(id); s.has(k) ? s.delete(k) : s.add(k); this.saveSet(this.archKey, s); },
+    pinnedIds() {
+      try {
+        const a = JSON.parse(localStorage.getItem(this.pinKey) || "[]");
+        return Array.isArray(a) ? a.map(String) : [];
+      } catch (e) { return []; }
+    },
+    isPinned(id) { return this.pinnedIds().indexOf(String(id)) >= 0; },
+    togglePin(id) {
+      const k = String(id);
+      const cur = this.pinnedIds();
+      this.savePinned(cur.indexOf(k) >= 0 ? cur.filter((x) => x !== k) : cur.concat([k]));
+    },
+    savePinned(a) { try { localStorage.setItem(this.pinKey, JSON.stringify(a)); } catch (e) {} },
   };
 
   const Drafts = {
@@ -144,6 +158,23 @@
     set(id, text) { const d = this.all(); const k = String(id); if (text && text.trim()) d[k] = text; else delete d[k]; try { localStorage.setItem(this.key, JSON.stringify(d)); } catch (e) {} },
     clear(id) { this.set(id, ""); },
   };
+
+  function applySentPreview(chatId, preview) {
+    Drafts.clear(chatId);
+    const c = (State.chats || []).find((x) => x.id === chatId);
+    if (!c) return;
+    if (preview) {
+      c.last_message = preview;
+      c.last_message_at = new Date().toISOString();
+      c.last_message_sender_id = State.me && State.me.id;
+      c.last_message_is_mine = true;
+      c.last_message_read = false;
+      State.chats = ensureSavedFirst([c].concat((State.chats || []).filter((x) => x.id !== c.id)));
+      patchChatListRow(c, true);
+    } else {
+      patchChatListRow(c, false);
+    }
+  }
 
   function filteredChats(chats) {
     const f = State.chatFilter || "all";
@@ -179,7 +210,25 @@
       ["all", "Все"], ["private", "Личные"], ["groups", "Группы"], ["channels", "Каналы"],
       ["unread", "Непрочитанные"], ["favorites", "Избранное"], ["archive", "Архив"],
     ];
-    bar.innerHTML = items.map(([id, label]) => `<button class="chat-filter ${State.chatFilter === id ? "active" : ""}" data-filter="${id}">${label}${counts[id] ? `<span>${counts[id]}</span>` : ""}</button>`).join("");
+    const html = items.map(([id, label]) => `<button class="chat-filter ${State.chatFilter === id ? "active" : ""}" data-filter="${id}">${label}${counts[id] ? `<span>${counts[id]}</span>` : ""}</button>`).join("");
+    if (!bar.querySelector(".chat-filter")) {
+      bar.innerHTML = html;
+      return;
+    }
+    items.forEach(([id, label]) => {
+      const btn = bar.querySelector('[data-filter="' + id + '"]');
+      if (!btn) return;
+      btn.classList.toggle("active", State.chatFilter === id);
+      let span = btn.querySelector("span");
+      if (!span) { span = document.createElement("span"); btn.appendChild(span); }
+      if (counts[id]) {
+        span.hidden = false;
+        span.textContent = String(counts[id]);
+      } else {
+        span.hidden = true;
+        span.textContent = "";
+      }
+    });
   }
 
   function initChatFilterScroller() {
@@ -261,14 +310,14 @@
       const allowAttach = allowSend && (can("can_send_files") || can("can_send_images"));
       if (input) {
         input.disabled = !allowSend;
-        input.placeholder = allowSend ? "Сообщение..." : (groupAllowsSend ? "В канал могут писать только администраторы" : "Ваша группа не может отправлять сообщения");
+        input.placeholder = allowSend ? "Сообщение..." : (groupAllowsSend ? "В канал могут писать только назначенные авторы" : "Ваша группа не может отправлять сообщения");
       }
       if (sendBtn) sendBtn.style.display = allowSend ? "" : "none";
       if (attachBtn) attachBtn.style.display = allowAttach ? "" : "none";
     }
   }
 
-  const QUICK_REACTIONS = ["👍", "❤️", "😂", "🔥", "👏", "😮", "😢", "🙏"];
+  const QUICK_REACTIONS = ["👍", "✅", "👀", "📎", "📅", "📝", "🤝", "❗"];
 
   // ---------- User preferences (local, per-device) ----------
   const Prefs = {
@@ -291,7 +340,8 @@
       // Notifications
       sound: true,
       notify: true,
-      notifyCalls: true,      // incoming/missed call system notifications
+      notifyCalls: true,      // incoming call system notifications
+      missedCallAlerts: true, // badge/toast/OS/taskbar for missed calls
       notifyPreview: true,    // show message text in notifications
       // General / App (desktop)
       keepInTray: true,       // keep running after [X]
@@ -339,6 +389,9 @@
     invalidate() { this._cache = null; },
   };
 
+  function missedCallAlertsOn() { return Prefs.get("missedCallAlerts") !== false; }
+  function uiMissedCallCount() { return missedCallAlertsOn() ? (State.missedCallsUnread || 0) : 0; }
+
   function applyPrefs() {
     const p = Prefs.all();
     document.documentElement.style.setProperty("--app-font", fontStack(p.fontFamily));
@@ -349,6 +402,7 @@
     applyChatBackground(p);
     const ta = document.getElementById("composer-input");
     if (ta) ta.spellcheck = !!p.spellcheck;
+    try { updateCallsBadge(); updateUnreadIndicator(); } catch (e) {}
   }
 
   function applyChatBackground(p) {
@@ -393,21 +447,50 @@
   }
   function statusDotHtml(status, online) {
     const cls = statusDotClass(status, online);
-    return online ? `<span class="online-dot ${cls}"></span>` : "";
+    return `<span class="online-dot ${cls}"></span>`;
+  }
+  function statusOf(userId, fallback) {
+    const id = Number(userId);
+    return State.statusMap[id] || State.statusMap[userId] || fallback || "online";
+  }
+  function rememberStatus(userId, status, online) {
+    const id = Number(userId);
+    if (!id) return;
+    const st = online === false ? "offline" : (status || "online");
+    State.statusMap[id] = st;
+  }
+  function applyOnlineDot(av, online, status) {
+    if (!av) return;
+    let dot = av.querySelector(".online-dot");
+    const cls = statusDotClass(status, online);
+    if (!dot) {
+      dot = document.createElement("span");
+      av.appendChild(dot);
+    }
+    dot.className = "online-dot " + cls;
+  }
+  function applyPresenceClass(el, online, status) {
+    if (!el || !el.classList) return;
+    el.classList.remove("presence-online", "presence-away", "presence-dnd", "presence-offline", "offline");
+    el.classList.add("presence-" + statusDotClass(status || "online", online));
+    if (!online) el.classList.add("offline");
   }
   function sendMyStatus(status) {
     status = status || Prefs.get("manualStatus") || "online";
     if (State.myStatus === status) return;
     State.myStatus = status;
-    State.statusMap[State.me && State.me.id] = status;
+    rememberStatus(State.me && State.me.id, status, true);
     if (State.ws && State.ws.readyState === 1) State.ws.send(JSON.stringify({ type: "status", status }));
   }
 
+  function isChannelWriter(chat) {
+    if (!chat || chat.type !== "channel") return true;
+    const me = (chat.members || []).find((m) => m.id === State.me.id);
+    return State.me.role === "admin" || !!(me && (me.can_post || me.is_chat_admin));
+  }
   function canWriteActiveChat() {
     if (!can("can_send_messages")) return false;
-    if (!State.activeChat || State.activeChat.type !== "channel") return true;
-    const me = State.activeChat.members && State.activeChat.members.find((m) => m.id === State.me.id);
-    return State.me.role === "admin" || !!(me && me.is_chat_admin);
+    return isChannelWriter(State.activeChat);
   }
 
   // ---------- Archive (localStorage-backed, like Telegram archive) ----------
@@ -472,12 +555,12 @@
               const sb = document.getElementById("scroll-bottom-btn");
               if (sb) sb.classList.add("show");
             }
-            API.markRead(State.activeChatId).catch(() => {});
+            if (!mine && isChatActuallyViewed()) maybeMarkActiveChatRead();
           }
         }
         // notify (sound + browser notification) for messages from others
         if (!mine && !m.is_system) notifyIncoming(m);
-        refreshChatList();
+        patchChatListFromMessage(m);
         break;
       }
       case "edit_message": {
@@ -486,24 +569,53 @@
           const i = State.messages.findIndex((x) => x.id === m.id);
           if (i >= 0) { State.messages[i] = m; rerenderMessages(); }
         }
+        {
+          const c = (State.chats || []).find((x) => x.id === m.chat_id);
+          if (c && c.last_message_sender_id === m.sender_id) {
+            c.last_message = previewFromMessage(m);
+            patchChatListRow(c, false);
+          }
+        }
         break;
       }
       case "delete_message": {
         if (data.chat_id === State.activeChatId) {
           State.messages = (State.messages || []).filter((m) => m.id !== data.message_id);
           rerenderMessages();
+          const c = (State.chats || []).find((x) => x.id === data.chat_id);
+          if (c) {
+            const last = (State.messages || []).filter((x) => !x.is_system).slice(-1)[0];
+            c.last_message = last ? previewFromMessage(last) : "";
+            c.last_message_at = last ? last.created_at : c.last_message_at;
+            c.last_message_is_mine = !!(last && last.sender_id === State.me.id);
+            patchChatListRow(c, false);
+          }
         }
-        refreshChatList();
         break;
       }
       case "read_receipt": {
-        if (data.chat_id === State.activeChatId && State.activeChat && State.activeChat.members) {
-          const m = State.activeChat.members.find((x) => x.id === data.user_id);
-          if (m) m.last_read_message_id = Math.max(m.last_read_message_id || 0, data.last_read_message_id || 0);
-          rerenderMessages();
+        // Private only (backend). Update ticks in place — never refetch the list.
+        if (data.chat_id === State.activeChatId && State.activeChat && State.activeChat.type === "private") {
+          const mem = (State.activeChat.members || []).find((x) => x.id === data.user_id);
+          if (mem) mem.last_read_message_id = Math.max(mem.last_read_message_id || 0, data.last_read_message_id || 0);
+          const lastRead = data.last_read_message_id || 0;
+          document.querySelectorAll("#messages .msg-row.out").forEach((row) => {
+            const id = parseInt(row.getAttribute("data-msg-id"), 10);
+            if (!id || id > lastRead) return;
+            const check = row.querySelector(".msg-check");
+            if (check) {
+              check.classList.remove("sent");
+              check.classList.add("read");
+              check.textContent = "✓✓";
+              check.title = "Прочитано";
+            }
+          });
         }
-        // Keep list unread counters fresh for the current user too.
-        refreshChatList();
+        const c = (State.chats || []).find((x) => x.id === data.chat_id);
+        if (c && c.last_message_is_mine) {
+          c.last_message_read = true;
+          patchChatListRow(c, false);
+        }
         break;
       }
       case "reaction_changed": {
@@ -529,9 +641,44 @@
       }
       case "presence": { updatePresence(data.user_id, data.online, data.status); break; }
       case "typing": { if (data.chat_id === State.activeChatId) showTyping(data.username); break; }
-      case "chat_created":
+      case "chat_created": {
+        const incoming = data.chat || { id: data.chat_id, type: "group", name: "Группа", members: [], member_count: 0, unread: 0 };
+        if (incoming.id && !(State.chats || []).some((c) => c.id === incoming.id)) {
+          State.chats = ensureSavedFirst([incoming].concat(State.chats || []));
+          renderChatList(State.chats);
+          updateUnreadIndicator();
+          if (incoming.type === "private") repairPrivateChatFromServer(incoming.id);
+        }
+        break;
+      }
       case "chat_updated": {
-        refreshChatList();
+        if (typeof data.can_post === "boolean" && data.chat_id) {
+          const applyPost = (c) => {
+            if (!c || c.id !== data.chat_id) return;
+            c.members = c.members || [];
+            let me = c.members.find((m) => m.id === State.me.id);
+            if (!me) { me = { id: State.me.id }; c.members.push(me); }
+            me.can_post = data.can_post;
+          };
+          (State.chats || []).forEach(applyPost);
+          if (State.activeChat) applyPost(State.activeChat);
+          applyPermsToUI();
+        }
+        if (data.chat && data.chat.id) {
+          const chats = State.chats || [];
+          const idx = chats.findIndex((c) => c.id === data.chat.id);
+          if (idx >= 0) {
+            const prev = chats[idx];
+            State.chats[idx] = Object.assign({}, prev, data.chat, {
+              members: (data.chat.members && data.chat.members.length) ? data.chat.members : prev.members,
+            });
+            renderChatList(State.chats);
+          } else {
+            State.chats = ensureSavedFirst([data.chat].concat(chats));
+            renderChatList(State.chats);
+            updateUnreadIndicator();
+          }
+        }
         if (data.chat_id === State.activeChatId) reloadActiveChat();
         break;
       }
@@ -587,9 +734,10 @@
   }
 
   // ---------- Layout ----------
+  // v1.0: крестик очистки поиска в сайдбарах — виден только пока поле в фокусе и не пустое
   function attachSearchClearButton(input, onClear) {
     if (!input || input.dataset.clearBound === "1") return;
-    const box = input.closest(".search-box") || input.parentElement;
+    const box = input.closest(".search-box, .rs-search-wrap") || input.parentElement;
     if (!box) return;
     input.dataset.clearBound = "1";
     input.classList.add("has-clear-btn");
@@ -600,7 +748,10 @@
     btn.setAttribute("aria-label", "Очистить поиск");
     btn.title = "Очистить";
     btn.innerHTML = "×";
-    const sync = () => btn.classList.toggle("show", !!input.value);
+    const sync = () => {
+      const show = !!input.value && document.activeElement === input;
+      btn.classList.toggle("show", show);
+    };
     btn.addEventListener("mousedown", (e) => e.preventDefault());
     btn.addEventListener("click", () => {
       input.value = "";
@@ -610,6 +761,8 @@
       sync();
     });
     input.addEventListener("input", sync);
+    input.addEventListener("focus", sync);
+    input.addEventListener("blur", sync);
     box.appendChild(btn);
     sync();
   }
@@ -646,7 +799,7 @@
         <aside class="right-sidebar" id="right-sidebar">
           <div class="rs-header">
             <div class="rs-title">${icon("users")} Пользователи <span class="rs-count" id="rs-count"></span></div>
-            <input type="text" class="rs-search" id="rs-search" placeholder="Поиск по всем пользователям" />
+            <div class="rs-search-wrap"><input type="text" class="rs-search" id="rs-search" placeholder="Поиск по всем пользователям" /></div>
           </div>
           <div class="rs-list" id="rs-list"></div>
         </aside>
@@ -691,7 +844,6 @@
       <div class="drawer-item" data-action="contacts"><span class="di-icon">${icon("contacts")}</span> Контактная книга</div>
       <div class="drawer-item" data-action="org"><span class="di-icon">${icon("org")}</span> Оргструктура</div>
       <div class="drawer-item" data-action="newgroup"><span class="di-icon">${icon("users")}</span> Новая группа</div>
-      <div class="drawer-item" data-action="newchannel"><span class="di-icon">${icon("channel")}</span> Новый канал</div>
       <div class="drawer-item" data-action="settings"><span class="di-icon">${icon("settings")}</span> Настройки</div>`;
     if (localStorage.getItem("cc_admin_token")) items += `<div class="drawer-item" data-action="returnadmin"><span class="di-icon">${icon("shield")}</span> Вернуться в админа</div>`;
     if (me.role === "admin") items += `<div class="drawer-item" data-action="admin"><span class="di-icon">${icon("shield")}</span> Админ-панель</div>`;
@@ -744,21 +896,115 @@
     // right sidebar: search all users (online + offline)
     const rsSearch = document.getElementById("rs-search");
     let rst = null;
-    if (rsSearch) rsSearch.addEventListener("input", () => {
-      clearTimeout(rst);
-      rst = setTimeout(() => loadRightSidebar(rsSearch.value.trim()), 250);
-    });
-    // Right sidebar returned to the previous simple search field layout.
+    if (rsSearch) {
+      rsSearch.addEventListener("input", () => {
+        clearTimeout(rst);
+        rst = setTimeout(() => loadRightSidebar(rsSearch.value.trim()), 250);
+      });
+      attachSearchClearButton(rsSearch, () => { clearTimeout(rst); loadRightSidebar(""); });
+    }
     loadRightSidebar("");
   }
 
   // ---------- Right sidebar (online users + search) ----------
+  function patchRightSidebarPresence(userId, online, status) {
+    const list = document.getElementById("rs-list");
+    if (!list) return;
+    const id = String(userId);
+    const row = list.querySelector('.rs-user[data-uid="' + id + '"]');
+    if (row) {
+      applyPresenceClass(row, online, status);
+      applyOnlineDot(row.querySelector(".avatar"), online, status);
+    }
+    const onlineN = (State.allUsers || []).filter((u) => u.is_online).length;
+    const countEl = document.getElementById("rs-count");
+    if (countEl) countEl.textContent = "· " + onlineN + " онлайн";
+  }
+
+
+  function paintRightSidebarList() {
+    const list = document.getElementById("rs-list");
+    const countEl = document.getElementById("rs-count");
+    if (!list) return;
+    const users = State.allUsers || [];
+    const online = users.filter((u) => u.is_online);
+    const offline = users.filter((u) => !u.is_online);
+    if (countEl) countEl.textContent = "· " + online.length + " онлайн";
+    const rows = [];
+    if (online.length) {
+      rows.push({ sec: "В сети — " + online.length });
+      online.forEach((u) => rows.push({ u: u, off: false }));
+    }
+    if (offline.length) {
+      rows.push({ sec: "Не в сети — " + offline.length });
+      offline.forEach((u) => rows.push({ u: u, off: true }));
+    }
+    if (!rows.length) {
+      list.onscroll = null;
+      list.innerHTML = `<div class="list-empty">Пользователи не найдены</div>`;
+      return;
+    }
+    const ROW = 58, SEC = 30;
+    function h(r) { return r.sec ? SEC : ROW; }
+    const totalH = rows.reduce((s, r) => s + h(r), 0);
+    const viewH = Math.max(list.clientHeight || 0, 400);
+    const offsets = [];
+    let acc = 0;
+    for (let i = 0; i < rows.length; i++) { offsets.push(acc); acc += h(rows[i]); }
+    function idxAt(y) {
+      let lo = 0, hi = offsets.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (offsets[mid] <= y) lo = mid; else hi = mid - 1;
+      }
+      return lo;
+    }
+    function renderWindow() {
+      const top = list.scrollTop || 0;
+      const start = Math.max(0, idxAt(top) - 4);
+      const endY = top + viewH;
+      let end = start;
+      while (end < rows.length && offsets[end] < endY + 200) end++;
+      end = Math.min(rows.length, end + 4);
+      const padTop = offsets[start];
+      const padBot = totalH - (end < rows.length ? offsets[end] : totalH);
+      let html = `<div class="pick-spacer" style="height:${padTop}px"></div>`;
+      for (let i = start; i < end; i++) {
+        const r = rows[i];
+        if (r.sec) html += `<div class="rs-section">${r.sec}</div>`;
+        else html += rsUserHtml(r.u, r.off);
+      }
+      html += `<div class="pick-spacer" style="height:${padBot}px"></div>`;
+      list.innerHTML = html;
+    }
+    list.onscroll = renderWindow;
+    renderWindow();
+  }
+
   async function loadRightSidebar(q) {
     const list = document.getElementById("rs-list");
     const countEl = document.getElementById("rs-count");
     if (!list) return;
     let users = [];
-    try { users = await API.searchUsers(q || "", 1000); } catch (e) { return; }
+    try {
+      users = await API.searchUsersLite(q || "", 2000);
+    } catch (e) {
+      try { users = await API.searchUsers(q || "", 1000); } catch (e2) { return; }
+    }
+    users.forEach((u) => {
+      const mapped = statusOf(u.id, "");
+      const apiSt = u.status || "";
+      let st = mapped;
+      if (mapped === "away" || mapped === "dnd") st = mapped;
+      else if (apiSt === "away" || apiSt === "dnd") st = apiSt;
+      else if (mapped === "offline" || apiSt === "offline") st = "offline";
+      else if (mapped) st = mapped;
+      else if (apiSt) st = apiSt;
+      else st = u.is_online ? "online" : "offline";
+      if (st === "offline") { u.is_online = false; u.status = "offline"; }
+      else { u.is_online = true; u.status = st; }
+      rememberStatus(u.id, u.status, u.is_online);
+    });
     State.allUsers = users;
     const online = users.filter((u) => u.is_online);
     const offline = users.filter((u) => !u.is_online);
@@ -767,7 +1013,7 @@
     let html = "";
     if (online.length) {
       html += `<div class="rs-section">В сети — ${online.length}</div>`;
-      html += online.map(rsUserHtml).join("");
+      html += online.map((u) => rsUserHtml(u, false)).join("");
     }
     if (offline.length) {
       html += `<div class="rs-section">Не в сети — ${offline.length}</div>`;
@@ -775,23 +1021,33 @@
     }
     if (!html) html = `<div class="list-empty">Пользователи не найдены</div>`;
     list.innerHTML = html;
-    // click on the user row (avatar/name) -> start a private chat
-    list.querySelectorAll(".rs-user-main").forEach((el) =>
-      el.addEventListener("click", () => startPrivateChat(parseInt(el.closest("[data-uid]").getAttribute("data-uid"), 10))));
-    // click on the ⓘ button -> open the profile card (don't start a chat)
-    list.querySelectorAll(".rs-info-btn").forEach((b) =>
-      b.addEventListener("click", (e) => { e.stopPropagation(); openUserCard(parseInt(b.getAttribute("data-info"), 10)); }));
+    list.onscroll = null;
+    if (list.dataset.delegated !== "1") {
+      list.dataset.delegated = "1";
+      list.addEventListener("click", (e) => {
+        const info = e.target && e.target.closest && e.target.closest(".rs-info-btn");
+        if (info) {
+          e.stopPropagation();
+          openUserCard(parseInt(info.getAttribute("data-info"), 10));
+          return;
+        }
+        const main = e.target && e.target.closest && e.target.closest(".rs-user-main");
+        if (!main) return;
+        const row = main.closest("[data-uid]");
+        if (row) startPrivateChat(parseInt(row.getAttribute("data-uid"), 10));
+      });
+    }
   }
 
   function rsUserHtml(u, offline) {
-    const stVal = State.statusMap[u.id] || u.status || "online";
-    const dot = statusDotHtml(stVal, u.is_online);
-    // Under each user: only email + phone (when present).
+    const st = u.is_online ? (statusOf(u.id, u.status) || "online") : "offline";
+    const presence = " presence-" + statusDotClass(st, !!u.is_online);
+    const dot = statusDotHtml(st, !!u.is_online);
     const lines = [];
     if (u.phone) lines.push(`<div class="rs-line rs-phone" title="Телефон"><span onclick="event.stopPropagation()">${escapeHtml(u.phone)}</span></div>`);
     if (u.email) lines.push(`<div class="rs-line" title="Почта"><a href="mailto:${escapeAttr(u.email)}" onclick="event.stopPropagation()">${escapeHtml(u.email)}</a></div>`);
     const contact = lines.length ? `<div class="rs-contact">${lines.join("")}</div>` : "";
-    return `<div class="rs-user ${offline ? "offline" : ""} presence-${statusDotClass(stVal, u.is_online)}" data-uid="${u.id}" data-live-user="${u.id}">
+    return `<div class="rs-user ${offline ? "offline" : ""}${presence}" data-uid="${u.id}" data-live-user="${u.id}">
       <div class="rs-user-row">
         <div class="rs-user-main" title="Написать ${escapeAttr(u.full_name || u.username)}">
           ${avatarHtml({ url: u.avatar_url, color: u.avatar_color, name: u.full_name || u.username, size: "sm", extra: dot })}
@@ -804,7 +1060,6 @@
       </div>
     </div>`;
   }
-
 
   // ---------- Today dashboard ----------
   async function openTodayModal() {
@@ -834,7 +1089,7 @@
     body.innerHTML = `
       <div class="today-grid">
         <section class="today-card"><h3>${icon("chat")} Непрочитанные</h3>${unreadChats.length ? unreadChats.map((c) => `<button class="today-row" data-chat="${c.id}"><b>${escapeHtml(c.name)}</b><span>${c.unread} новых · ${escapeHtml(c.last_message || "")}</span></button>`).join("") : '<div class="today-empty">Нет непрочитанных</div>'}</section>
-        <section class="today-card"><h3>${icon("phone")} Вызовы</h3><button class="today-big" id="today-calls"><b>${missed.count || 0}</b><span>пропущенных</span></button></section>
+        <section class="today-card"><h3>${icon("phone")} Вызовы</h3><button class="today-big" id="today-calls"><b>${missedCallAlertsOn() ? (missed.count || 0) : 0}</b><span>пропущенных</span></button></section>
         <section class="today-card"><h3>${icon("calendar")} Календарь</h3>${notes.length ? notes.slice(0, 8).map((n) => `<div class="today-row"><b>${new Date(n.starts_at).toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit"})} · ${escapeHtml(n.title)}</b><span>${escapeHtml(n.calendar_name || "")}</span></div>`).join("") : '<div class="today-empty">На сегодня заметок нет</div>'}</section>
         <section class="today-card"><h3>${icon("support")} Поддержка</h3>${openTickets.length ? openTickets.map((t) => `<button class="today-row" data-support="${t.id}"><b>#${t.id} ${escapeHtml(t.subject)}</b><span>${escapeHtml(t.status)}${t.unread ? " · новых " + t.unread : ""}</span></button>`).join("") : '<div class="today-empty">Активных обращений нет</div>'}</section>
         <section class="today-card"><h3>${icon("channel")} Каналы</h3>${channelChats.length ? channelChats.map((c) => `<button class="today-row" data-chat="${c.id}"><b>${escapeHtml(c.name)}</b><span>${escapeHtml(c.last_message || "")}</span></button>`).join("") : '<div class="today-empty">Нет свежих объявлений</div>'}</section>
@@ -1355,6 +1610,23 @@
 
   // ---------- Calls: incoming notifications + missed calls ----------
   function callTitle(c) { return c.caller_name || c.caller_number || "Неизвестный номер"; }
+  function notifyDurationMs() { return Math.max(1000, Number(window.__notifyDurationMs) || 5000); }
+  function closeNoticeLater(n, tag) {
+    const ms = notifyDurationMs();
+    setTimeout(() => {
+      try { if (n && typeof n.close === "function") n.close(); } catch (e) {}
+      try {
+        if (tag && navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+          navigator.serviceWorker.getRegistrations().then((regs) => {
+            regs.forEach((reg) => {
+              if (!reg.getNotifications) return;
+              reg.getNotifications({ tag: tag }).then((list) => list.forEach((x) => { try { x.close(); } catch (e) {} }));
+            });
+          });
+        }
+      } catch (e) {}
+    }, ms);
+  }
 
   async function loadMissedCallsUnread() {
     try {
@@ -1368,7 +1640,7 @@
   function updateCallsBadge() {
     const b = document.getElementById("calls-unread-badge");
     if (!b) return;
-    const n = State.missedCallsUnread || 0;
+    const n = uiMissedCallCount();
     if (n > 0) {
       b.style.display = "inline-flex";
       b.textContent = n > 99 ? "99+" : String(n);
@@ -1394,7 +1666,7 @@
     if (Prefs.get("manualStatus") === "dnd") return;
     const title = "Входящий вызов";
     const body = callTitle(c) + (c.extension ? " → " + c.extension : "");
-    window.toast(title + ": " + body, "success");
+    window.toast(title + ": " + body, "call");
     if (Prefs.get("sound")) playMessageSound();
     let pop = document.getElementById("incoming-call-pop");
     if (!pop) {
@@ -1409,7 +1681,7 @@
       <button class="ic-close">✕</button>`;
     pop.classList.add("show");
     pop.querySelector(".ic-close").addEventListener("click", () => pop.classList.remove("show"));
-    setTimeout(() => { if (pop) pop.classList.remove("show"); }, 5000);
+    setTimeout(() => { if (pop) pop.classList.remove("show"); }, Math.max(1000, Number(window.__notifyDurationMs) || 5000));
 
     // System notifications for calls can be disabled in Settings → Notifications.
     if (Prefs.get("notifyCalls") && "Notification" in window) {
@@ -1417,6 +1689,7 @@
         try {
           const n = new Notification(title, { body, tag: "cc-incoming-call-" + key, renotify: false, requireInteraction: false, silent: false });
           n.onclick = () => { window.focus(); openCallsModal(); n.close(); };
+          closeNoticeLater(n, "cc-incoming-call-" + key);
         } catch (e) {}
       };
       if (Notification.permission === "granted") show();
@@ -1425,13 +1698,14 @@
   }
 
   function showMissedCall(c) {
+    if (!missedCallAlertsOn()) return;
     const key = recentCallKey(c);
     if (isRecentCall(State.recentMissedCalls, key, 60000)) return;
     if (Prefs.get("manualStatus") === "dnd") return;
     const who = callTitle(c);
     const number = c.caller_number ? (" · " + c.caller_number) : "";
     const text = "Пропущенный вызов: " + who;
-    window.toast(text, "error");
+    window.toast(text, "missed");
     if (Prefs.get("sound")) playMessageSound();
     showMissedCallNotification(c, who + number);
   }
@@ -1459,14 +1733,17 @@
                   { action: "close", title: "Закрыть" },
                 ],
               }));
+              closeNoticeLater(null, opts.tag);
             } catch (e) {
               const n = new Notification(title, opts);
               n.onclick = () => { window.focus(); openCallsModal(); n.close(); };
+              closeNoticeLater(n, opts.tag);
             }
           });
         } else {
           const n = new Notification(title, opts);
           n.onclick = () => { window.focus(); openCallsModal(); n.close(); };
+          closeNoticeLater(n, opts.tag);
         }
       } catch (e) {}
     };
@@ -1868,7 +2145,7 @@
     try { const fresh = await API.getUser(userId); if (fresh) u = fresh; } catch (e) {}
     if (!u) return;
     const overlay = document.getElementById("modal-overlay");
-    const stVal = State.statusMap[u.id] || u.status || "online";
+    const stVal = statusOf(u.id, u.status);
     const status = statusText(stVal, u.is_online);
     const row = (label, val, isLink) => {
       if (!val) return "";
@@ -1952,8 +2229,120 @@
     try { State.chats = await API.listChats(); renderChatList(State.chats); updateUnreadIndicator(); }
     catch (err) { window.toast(err.message, "error"); }
   }
+  let _refreshChatListTimer = null;
+  let _refreshChatListBusy = false;
+  let _refreshChatListAgain = false;
   async function refreshChatList() {
-    try { State.chats = await API.listChats(); renderChatList(State.chats); updateUnreadIndicator(); } catch (e) {}
+    if (_refreshChatListTimer) clearTimeout(_refreshChatListTimer);
+    _refreshChatListTimer = setTimeout(flushRefreshChatList, 280);
+  }
+  async function flushRefreshChatList() {
+    _refreshChatListTimer = null;
+    if (_refreshChatListBusy) { _refreshChatListAgain = true; return; }
+    _refreshChatListBusy = true;
+    try {
+      State.chats = await API.listChats();
+      renderChatList(State.chats);
+      updateUnreadIndicator();
+    } catch (e) {}
+    _refreshChatListBusy = false;
+    if (_refreshChatListAgain) {
+      _refreshChatListAgain = false;
+      refreshChatList();
+    }
+  }
+  function previewFromMessage(m) {
+    if (!m) return "";
+    if (m.attachment_kind === "image") return "📷 " + (m.text || "Фото");
+    if (m.attachment_kind === "file") return "📎 " + (m.attachment_name || m.text || "Файл");
+    return m.text || "";
+  }
+  function patchChatListRow(c, bump) {
+    if (!c) return;
+    const list = document.getElementById("chat-list");
+    const visible = filteredChats([c]).length > 0;
+    const el = list && list.querySelector('.chat-item[data-chat-id="' + c.id + '"]');
+    if (!visible) {
+      if (el) el.remove();
+      renderChatFilters();
+      updateUnreadIndicator();
+      return;
+    }
+    if (!list || !el) {
+      renderChatList(State.chats);
+      return;
+    }
+    const last = el.querySelector(".chat-last");
+    const time = el.querySelector(".chat-time");
+    if (time) time.textContent = c.last_message_at ? formatTime(c.last_message_at) : "";
+    if (last) {
+      const draft = Drafts.get(c.id).trim();
+      last.innerHTML = draft
+        ? `<span class="draft-prefix">Черновик:</span> ${escapeHtml(draft.slice(0, 60))}`
+        : (c.last_message ? `${chatListCheckHtml(c)}${escapeHtml(c.last_message.slice(0, 60))}` : "Нет сообщений");
+    }
+    const bottom = el.querySelector(".chat-bottom");
+    let badge = el.querySelector(".unread-badge");
+    if (!badge && bottom) {
+      badge = document.createElement("span");
+      badge.className = "unread-badge is-empty";
+      bottom.appendChild(badge);
+    }
+    if (badge) {
+      if (c.unread) {
+        badge.classList.remove("is-empty");
+        badge.textContent = c.unread > 99 ? "99+" : String(c.unread);
+      } else {
+        badge.classList.add("is-empty");
+        badge.textContent = "";
+      }
+    }
+    if (bump && !ChatPrefs.isPinned(c.id)) {
+      let target = list.firstChild;
+      if (isSavedChat(c)) {
+        target = list.firstChild;
+      } else {
+        const pins = list.querySelectorAll(".chat-item.pinned-chat");
+        const savedEl = list.querySelector(".chat-item.saved-chat");
+        if (pins.length) target = pins[pins.length - 1].nextSibling;
+        else target = savedEl ? savedEl.nextSibling : list.firstChild;
+      }
+      if (el !== target) {
+        const keepView = list.scrollTop > 8;
+        const h = el.offsetHeight || 60;
+        list.insertBefore(el, target);
+        if (keepView) list.scrollTop += h + 4;
+      }
+    }
+    renderChatFilters();
+    updateUnreadIndicator();
+  }
+  function patchChatListFromMessage(m) {
+    if (!m || !m.chat_id) { refreshChatList(); return; }
+    const chats = State.chats || [];
+    const c = chats.find((x) => x.id === m.chat_id);
+    if (!c) { refreshChatList(); return; }
+    if (c.type === "private" && m.sender_id !== State.me.id && looksLikeSelfPrivate(c)) {
+      applyPrivatePeer(c, {
+        id: m.sender_id,
+        username: m.sender_username || "",
+        full_name: m.sender_name || "",
+        avatar_color: m.sender_color || "#3390ec",
+        avatar_url: m.sender_avatar || "",
+      });
+      paintPrivateChatPeer(c);
+    }
+    c.last_message = previewFromMessage(m);
+    c.last_message_at = m.created_at;
+    c.last_message_sender_id = m.sender_id;
+    c.last_message_is_mine = m.sender_id === State.me.id;
+    if (c.last_message_is_mine) c.last_message_read = false;
+    if (m.sender_id !== State.me.id && !(m.chat_id === State.activeChatId && isChatActuallyViewed())) {
+      c.unread = (c.unread || 0) + 1;
+    }
+    if (m.sender_id === State.me.id) Drafts.clear(m.chat_id);
+    State.chats = ensureSavedFirst([c].concat(chats.filter((x) => x.id !== c.id)));
+    patchChatListRow(c, true);
   }
 
   /* ---------- Unread indicator (taskbar / tab highlight) ----------
@@ -1967,7 +2356,7 @@
   let _lastUnreadState = "";
   function totalUnread() {
     const chatUnread = (State.chats || []).reduce((sum, c) => sum + (c.is_muted ? 0 : (c.unread || 0)), 0);
-    return chatUnread + (State.missedCallsUnread || 0);
+    return chatUnread + uiMissedCallCount();
   }
   function pushDesktopUnreadState(chatUnread, callUnread, flash) {
     const D = window.CorporateChatDesktop;
@@ -1980,7 +2369,7 @@
   }
   function updateUnreadIndicator() {
     const chatUnread = (State.chats || []).reduce((sum, c) => sum + (c.is_muted ? 0 : (c.unread || 0)), 0);
-    const callUnread = State.missedCallsUnread || 0;
+    const callUnread = uiMissedCallCount();
     const n = chatUnread + callUnread;
     document.body.classList.toggle("app-has-unread", n > 0);
     document.body.classList.toggle("app-has-missed-call", callUnread > 0);
@@ -2023,6 +2412,76 @@
   function isSavedChat(c) {
     return !!(c && c.type === "private" && (c.name === "Избранное" || ((c.members || []).length === 1 && c.created_by === State.me.id)));
   }
+  function privatePeerOf(c) {
+    if (!c || c.type !== "private") return null;
+    return (c.members || []).find((m) => m.id !== State.me.id) || null;
+  }
+  function looksLikeSelfPrivate(c) {
+    if (!c || c.type !== "private" || isSavedChat(c)) return false;
+    if (privatePeerOf(c)) return false;
+    const names = [State.me && State.me.full_name, State.me && State.me.username].filter(Boolean);
+    return !c.name || names.indexOf(c.name) >= 0;
+  }
+  function applyPrivatePeer(c, peer) {
+    if (!c || !peer || peer.id === State.me.id) return false;
+    c.name = peer.full_name || peer.username || c.name;
+    if (peer.avatar_color) c.avatar_color = peer.avatar_color;
+    if (peer.avatar_url != null) c.avatar_url = peer.avatar_url || "";
+    const rest = (c.members || []).filter((m) => m.id === State.me.id || m.id === peer.id);
+    if (!rest.some((m) => m.id === peer.id)) rest.push(peer);
+    c.members = rest;
+    return true;
+  }
+  function paintPrivateChatPeer(c) {
+    if (!c) return;
+    const el = document.querySelector('.chat-item[data-chat-id="' + c.id + '"]');
+    if (el) {
+      const nameEl = el.querySelector(".chat-name");
+      if (nameEl) {
+        const pin = ChatPrefs.isPinned(c.id) ? "📌 " : "";
+        const fav = ChatPrefs.isFavorite(c.id) ? "⭐ " : "";
+        const arch = ChatPrefs.isArchived(c.id) ? "🗄️ " : "";
+        const mute = c.is_muted ? "🔇 " : "";
+        nameEl.textContent = pin + fav + arch + mute + (c.name || "");
+      }
+    }
+    if (State.activeChat && State.activeChat.id === c.id) {
+      State.activeChat.name = c.name;
+      State.activeChat.avatar_color = c.avatar_color;
+      State.activeChat.avatar_url = c.avatar_url;
+      State.activeChat.members = c.members;
+      const title = document.getElementById("ch-name");
+      if (title) title.textContent = c.name || "";
+    }
+  }
+  function repairPrivateChatFromServer(chatId) {
+    const cur = (State.chats || []).find((x) => x.id === chatId);
+    if (!cur || cur.type !== "private" || isSavedChat(cur)) return;
+    if (privatePeerOf(cur) && !looksLikeSelfPrivate(cur)) return;
+    API.getChat(chatId).then((full) => {
+      if (!full || full.type !== "private") return;
+      const idx = (State.chats || []).findIndex((x) => x.id === full.id);
+      if (idx < 0) return;
+      State.chats[idx] = Object.assign({}, State.chats[idx], full);
+      paintPrivateChatPeer(State.chats[idx]);
+    }).catch(() => {});
+  }
+  // Telegram-like: Saved Messages always stays first, then pinned chats
+  // in pin order, then the rest. Incoming messages must not bounce «Избранное»
+  // or the pinned block.
+  function ensureSavedFirst(chats) {
+    const saved = [];
+    const pinned = [];
+    const rest = [];
+    const pinPos = new Map(ChatPrefs.pinnedIds().map((id, i) => [String(id), i]));
+    (chats || []).forEach((c) => {
+      if (isSavedChat(c)) saved.push(c);
+      else if (pinPos.has(String(c.id))) pinned.push(c);
+      else rest.push(c);
+    });
+    pinned.sort((a, b) => (pinPos.get(String(a.id)) || 0) - (pinPos.get(String(b.id)) || 0));
+    return saved.concat(pinned).concat(rest);
+  }
 
   function chatListCheckHtml(c) {
     if (!c || !c.last_message || !c.last_message_is_mine || isSavedChat(c)) return "";
@@ -2033,36 +2492,39 @@
     const list = document.getElementById("chat-list");
     if (!list) return;
     renderChatFilters();
-    const visibleChats = filteredChats(chats);
+    const visibleChats = ensureSavedFirst(filteredChats(chats));
     if (!visibleChats.length) {
       const label = { all: "Нет чатов", private: "Нет личных чатов", groups: "Нет групп", channels: "Нет каналов", unread: "Нет непрочитанных", favorites: "Нет избранных чатов", archive: "Архив пуст" }[State.chatFilter] || "Нет чатов";
       list.innerHTML = `<div class="list-empty">${label}.<br>${State.chatFilter === "all" ? "Нажмите кнопку «Новый чат» чтобы начать общение." : ""}</div>`;
       return;
     }
+    const keepScroll = list.scrollTop;
     list.innerHTML = visibleChats.map((c) => {
       const saved = isSavedChat(c);
       const other = c.type === "private" && c.members ? c.members.find((m) => m.id !== State.me.id) : null;
-      const online = saved ? false : (other ? !!other.is_online : (c.members && c.members.some((m) => m.id !== State.me.id && m.is_online)));
-      const dotStatus = other ? (State.statusMap[other.id] || other.status || "online") : "online";
+      const online = saved ? false : (other ? !!other.is_online : ((c.online_count || 0) > 0 || (c.members && c.members.some((m) => m.id !== State.me.id && m.is_online))));
+      const dotStatus = other ? (statusOf(other.id, other.status) || "online") : "online";
       const isGroup = c.type !== "private";
       const isChannel = c.type === "channel";
       const presenceCls = saved ? "" : "presence-" + statusDotClass(dotStatus, online);
       const liveAttr = other ? ` data-live-user="${other.id}"` : "";
+      const pinned = !saved && ChatPrefs.isPinned(c.id);
       return `
-      <div class="chat-item ${c.id === State.activeChatId ? "active" : ""} ${saved ? "saved-chat" : ""} ${presenceCls}" data-chat-id="${c.id}"${liveAttr}>
+      <div class="chat-item ${c.id === State.activeChatId ? "active" : ""} ${saved ? "saved-chat" : ""} ${pinned ? "pinned-chat" : ""} ${presenceCls}" data-chat-id="${c.id}"${liveAttr}>
         ${avatarHtml({ url: saved ? "" : c.avatar_url, color: saved ? "#8b5cf6" : c.avatar_color, name: c.name, isGroup, isChannel, isSaved: saved, extra: saved ? "" : statusDotHtml(dotStatus, online) })}
         <div class="chat-meta">
           <div class="chat-top">
-            <span class="chat-name">${ChatPrefs.isFavorite(c.id) ? "⭐ " : ""}${ChatPrefs.isArchived(c.id) ? "🗄️ " : ""}${c.is_muted ? "🔇 " : ""}${escapeHtml(c.name)}</span>
+            <span class="chat-name">${pinned ? "📌 " : ""}${ChatPrefs.isFavorite(c.id) ? "⭐ " : ""}${ChatPrefs.isArchived(c.id) ? "🗄️ " : ""}${c.is_muted ? "🔇 " : ""}${escapeHtml(c.name)}</span>
             <span class="chat-time">${c.last_message_at ? formatTime(c.last_message_at) : ""}</span>
           </div>
           <div class="chat-bottom">
             <span class="chat-last">${Drafts.get(c.id).trim() ? `<span class="draft-prefix">Черновик:</span> ${escapeHtml(Drafts.get(c.id).trim().slice(0, 60))}` : (c.last_message ? `${chatListCheckHtml(c)}${escapeHtml(c.last_message.slice(0, 60))}` : "Нет сообщений")}</span>
-            ${c.unread ? `<span class="unread-badge">${c.unread > 99 ? "99+" : c.unread}</span>` : ""}
+            <span class="unread-badge${c.unread ? "" : " is-empty"}">${c.unread > 99 ? "99+" : (c.unread || "")}</span>
           </div>
         </div>
       </div>`;
     }).join("");
+    list.scrollTop = keepScroll;
     list.querySelectorAll(".chat-item").forEach((el) => {
       const cid = parseInt(el.getAttribute("data-chat-id"), 10);
       el.addEventListener("click", () => Router.navigate("/chats/" + el.getAttribute("data-chat-id")));
@@ -2103,6 +2565,9 @@
     }
     const items = [];
     items.push({ act: "open", icon: icon("chat"), label: "Открыть" });
+    if (!isSavedChat(chat)) {
+      items.push({ act: "pin", icon: icon("pin"), label: ChatPrefs.isPinned(chatId) ? "Открепить" : "Закрепить" });
+    }
     items.push({ act: "favorite", icon: ChatPrefs.isFavorite(chatId) ? "⭐" : "☆", label: ChatPrefs.isFavorite(chatId) ? "Убрать из избранного" : "В избранное" });
     items.push({ act: "archive", icon: ChatPrefs.isArchived(chatId) ? "📤" : "🗄️", label: ChatPrefs.isArchived(chatId) ? "Вернуть из архива" : "В архив" });
     if (canDelete) items.push({ sep: true }, { act: "delete", icon: "🗑️", label: "Удалить чат", danger: true });
@@ -2125,6 +2590,11 @@
       const act = item.getAttribute("data-act");
       closeChatListMenu();
       if (act === "open") Router.navigate("/chats/" + chatId);
+      else if (act === "pin") {
+        if (!ChatPrefs.isPinned(chatId) && ChatPrefs.isArchived(chatId)) ChatPrefs.toggleArchive(chatId);
+        ChatPrefs.togglePin(chatId);
+        renderChatList(State.chats);
+      }
       else if (act === "favorite") { ChatPrefs.toggleFavorite(chatId); renderChatList(State.chats); }
       else if (act === "archive") { ChatPrefs.toggleArchive(chatId); renderChatList(State.chats); }
       else if (act === "delete") confirmDeleteChat(chat);
@@ -2159,7 +2629,7 @@
     if (users.length) {
       html += `<div class="list-section-title">Пользователи</div>` + users.map((u) => `
         <div class="chat-item" data-user-id="${u.id}">
-          ${avatarHtml({ url: u.avatar_url, color: u.avatar_color, name: u.full_name || u.username, extra: statusDotHtml(State.statusMap[u.id] || u.status || "online", u.is_online) })}
+          ${avatarHtml({ url: u.avatar_url, color: u.avatar_color, name: u.full_name || u.username, extra: statusDotHtml(statusOf(u.id, u.status), u.is_online) })}
           <div class="chat-meta"><div class="chat-top"><span class="chat-name">${escapeHtml(u.full_name || u.username)}</span></div><div class="chat-last">@${escapeHtml(u.username)}</div></div>
         </div>`).join("");
     }
@@ -2246,6 +2716,7 @@
   // ---------- Open chat ----------
   async function openChat(chatId) {
     if (State.activeChatId && String(State.activeChatId) !== String(chatId)) await cleanupPendingEmptyPrivateChat(true);
+    try { ReadersPop.hide(); } catch (e) {}
     State.activeChatId = chatId;
     // Clear composer state when switching chats
     State.replyTo = null;
@@ -2269,8 +2740,10 @@
       State.hasMoreOlder = first.length >= State.pageSize;
       State.loadingOlder = false;
       renderChatArea();
-      renderChatList(State.chats);
-      API.markRead(chatId).then((r) => { if (State.activeChat && r && r.last_read_message_id) State.activeChat.last_read_message_id = r.last_read_message_id; refreshChatList(); }).catch(() => {});
+      document.querySelectorAll(".chat-item").forEach((el) => {
+        el.classList.toggle("active", String(el.getAttribute("data-chat-id")) === String(chatId));
+      });
+      maybeMarkActiveChatRead();
     } catch (err) {
       window.toast(err.message, "error");
       Router.navigate("/chats");
@@ -2280,7 +2753,7 @@
   function isMyGroupAdmin() {
     if (!State.activeChat) return false;
     if (State.me.role === "admin") return true;
-    const me = State.activeChat.members.find((m) => m.id === State.me.id);
+    const me = (State.activeChat.members || []).find((m) => m.id === State.me.id);
     return me && me.is_chat_admin;
   }
 
@@ -2291,7 +2764,7 @@
     area.innerHTML = `
       <div class="chat-header">
         <button class="back-btn" id="back-btn">‹</button>
-        ${avatarHtml({ url: saved ? "" : chat.avatar_url, color: saved ? "#8b5cf6" : chat.avatar_color, name: chat.name, isGroup: chat.type !== "private", isChannel: chat.type === "channel", isSaved: saved, size: "sm", id: "ch-avatar", extra: (!saved && chat.type === "private") ? statusDotHtml(State.statusMap[(chat.members.find((m) => m.id !== State.me.id) || {}).id] || (chat.members.find((m) => m.id !== State.me.id) || {}).status || "online", !!(chat.members.find((m) => m.id !== State.me.id) || {}).is_online) : "" })}
+        ${avatarHtml({ url: saved ? "" : chat.avatar_url, color: saved ? "#8b5cf6" : chat.avatar_color, name: chat.name, isGroup: chat.type !== "private", isChannel: chat.type === "channel", isSaved: saved, size: "sm", id: "ch-avatar", extra: (!saved && chat.type === "private") ? statusDotHtml(statusOf(((chat.members || []).find((m) => m.id !== State.me.id) || {}).id, ((chat.members || []).find((m) => m.id !== State.me.id) || {}).status), !!((chat.members || []).find((m) => m.id !== State.me.id) || {}).is_online) : "" })}
         <div class="chat-header-info" id="ch-info-click" style="cursor:pointer">
           <div class="chat-header-name" id="ch-name">${escapeHtml(chat.name)}</div>
           <div class="chat-header-status" id="header-status"></div>
@@ -2308,7 +2781,18 @@
       <div class="multi-select-bar" id="multi-select-bar" style="display:none"></div>
       <div class="messages" id="messages"></div>
       <div class="drop-overlay" id="drop-overlay">
-        <div class="drop-card"><div class="drop-icon">📎</div><div class="drop-text">Перетащите файлы сюда, чтобы отправить</div></div>
+        <div class="drop-split">
+          <div class="drop-zone" data-drop="file" id="drop-zone-file">
+            <div class="drop-icon">📎</div>
+            <div class="drop-text">Файл</div>
+            <div class="drop-sub">Загрузить в чат</div>
+          </div>
+          <div class="drop-zone" data-drop="path" id="drop-zone-path">
+            <div class="drop-icon">📂</div>
+            <div class="drop-text">Путь</div>
+            <div class="drop-sub">Отправить ссылку на диск, без загрузки</div>
+          </div>
+        </div>
       </div>
       <button class="scroll-top-btn" id="scroll-top-btn" title="Вверх">⬆</button>
       <button class="scroll-bottom-btn" id="scroll-bottom-btn" title="Вниз">⬇</button>
@@ -2327,7 +2811,7 @@
             <option value="important">Важное</option>
             <option value="critical">Критичное</option>
           </select>
-          <textarea id="composer-input" rows="1" placeholder="Сообщение..."></textarea>
+          <textarea id="composer-input" rows="1" maxlength="15000" placeholder="Сообщение..."></textarea>
           <button class="send-btn" id="send-btn" title="Отправить">➤</button>
         </div>
         <input type="file" id="file-input" multiple style="display:none"
@@ -2364,7 +2848,13 @@
       if (!State.editingId) Drafts.set(State.activeChatId, input.value);
       resizeComposerInput();
       clearTimeout(draftListTimer);
-      draftListTimer = setTimeout(() => renderChatList(State.chats || []), 350);
+      const chatId = State.activeChatId;
+      const paint = () => {
+        const c = (State.chats || []).find((x) => x.id === chatId);
+        if (c) patchChatListRow(c, false);
+      };
+      if (!input.value.trim()) paint();
+      else draftListTimer = setTimeout(paint, 350);
       sendTyping();
     });
     input.addEventListener("keydown", (e) => {
@@ -2427,26 +2917,18 @@
       return;
     }
     if (chat.type === "private") {
-      const other = chat.members.find((m) => m.id !== State.me.id);
+      const other = (chat.members || []).find((m) => m.id !== State.me.id);
       const online = other && other.is_online;
-      const stVal = (other && (State.statusMap[other.id] || other.status)) || "online";
+      const stVal = (other && statusOf(other.id, other.status)) || "online";
       st.textContent = statusText(stVal, online);
       st.classList.toggle("online", !!online && stVal === "online");
       st.classList.toggle("away", !!online && stVal === "away");
       st.classList.toggle("dnd", !!online && stVal === "dnd");
-      const av = document.getElementById("ch-avatar");
-      if (av) {
-        let dot = av.querySelector(".online-dot");
-        if (online) {
-          if (!dot) { dot = document.createElement("span"); dot.className = "online-dot"; av.appendChild(dot); }
-          dot.classList.toggle("away", stVal === "away");
-          dot.classList.toggle("dnd", stVal === "dnd");
-          dot.classList.toggle("online", stVal === "online");
-        } else if (dot) dot.remove();
-      }
+      applyOnlineDot(document.getElementById("ch-avatar"), !!online, stVal);
     } else {
-      const onlineCount = chat.members.filter((m) => m.is_online).length;
-      st.textContent = chat.type === "channel" ? (chat.members.length + " подписчиков") : (chat.members.length + " участников, " + onlineCount + " в сети");
+      const memberCount = chat.member_count || (chat.members || []).length;
+      const onlineCount = (typeof chat.online_count === "number") ? chat.online_count : (chat.members || []).filter((m) => m.is_online).length;
+      st.textContent = chat.type === "channel" ? (memberCount + " подписчиков") : (memberCount + " участников, " + onlineCount + " в сети");
       st.classList.remove("online");
     }
   }
@@ -2566,6 +3048,40 @@
     State.loadingOlder = false;
   }
 
+  async function jumpToMessage(id) {
+    id = parseInt(id, 10);
+    if (!id || !State.activeChatId) return;
+    const box = document.getElementById("messages");
+    const findEl = () => box && box.querySelector('[data-msg-id="' + id + '"]');
+    let el = findEl();
+    if (!el) {
+      let guard = 0;
+      while (!findEl() && State.hasMoreOlder && guard < 40) {
+        guard++;
+        const oldest = State.messages[0] && State.messages[0].id;
+        await loadOlderMessages();
+        if (State.messages[0] && State.messages[0].id === oldest) break;
+      }
+      el = findEl();
+    }
+    if (!el && API.getMessage) {
+      try {
+        const m = await API.getMessage(State.activeChatId, id);
+        if (m && m.chat_id === State.activeChatId && !State.messages.some((x) => x.id === m.id)) {
+          State.messages.push(m);
+          State.messages.sort((a, b) => a.id - b.id);
+          rerenderMessages();
+        }
+        el = findEl();
+      } catch (e) {}
+    }
+    el = findEl();
+    if (!el) { window.toast("Исходное сообщение недоступно в этом чате", "error"); return; }
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.add("msg-jump-hl");
+    setTimeout(() => el.classList.remove("msg-jump-hl"), 1800);
+  }
+
   function appendMessage(m) {
     const box = document.getElementById("messages");
     if (!box) return;
@@ -2576,8 +3092,13 @@
   }
 
   function messageReadInfo(m) {
-    if (!m || m.sender_id !== State.me.id || !State.activeChat || !State.activeChat.members) return null;
+    if (!m || m.sender_id !== State.me.id || !State.activeChat) return null;
     if (isSavedChat(State.activeChat)) return null;
+    // Groups/channels: ticks are a hover target for "who read this". Roster
+    // is not in the list payload, so names load on demand.
+    if (State.activeChat.type !== "private") {
+      return { read: false, text: "✓", title: "Кто прочитал", count: 0, total: 0, group: true };
+    }
     const others = (State.activeChat.members || []).filter((u) => u.id !== State.me.id && u.is_active !== false);
     if (!others.length) return null;
     const readers = others.filter((u) => (u.last_read_message_id || 0) >= m.id);
@@ -2588,8 +3109,100 @@
       title: allRead ? "Прочитано" : "Отправлено, не прочитано",
       count: readers.length,
       total: others.length,
+      group: false,
     };
   }
+
+  function ruPeople(n) {
+    const n10 = n % 10, n100 = n % 100;
+    if (n10 === 1 && n100 !== 11) return n + " человек";
+    if (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) return n + " человека";
+    return n + " человек";
+  }
+  function ruReadVerb(n) {
+    const n10 = n % 10, n100 = n % 100;
+    return (n10 === 1 && n100 !== 11) ? "прочитал" : "прочитали";
+  }
+
+  const ReadersPop = {
+    el: null,
+    timer: null,
+    hideTimer: null,
+    msgId: 0,
+    cache: {},
+    clearTimers() {
+      if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+      if (this.hideTimer) { clearTimeout(this.hideTimer); this.hideTimer = null; }
+    },
+    hide() {
+      this.clearTimers();
+      this.msgId = 0;
+      if (this.el) { this.el.remove(); this.el = null; }
+    },
+    schedule(msgId, anchor, delay) {
+      this.clearTimers();
+      this.timer = setTimeout(() => this.open(msgId, anchor), delay == null ? 320 : delay);
+    },
+    scheduleHide() {
+      if (this.hideTimer) clearTimeout(this.hideTimer);
+      this.hideTimer = setTimeout(() => this.hide(), 220);
+    },
+    async open(msgId, anchor) {
+      if (!State.activeChatId || State.activeChat && State.activeChat.type === "private") return;
+      this.clearTimers();
+      this.msgId = msgId;
+      if (!this.el) {
+        this.el = document.createElement("div");
+        this.el.className = "readers-pop";
+        this.el.addEventListener("mouseenter", () => this.clearTimers());
+        this.el.addEventListener("mouseleave", () => this.scheduleHide());
+        document.body.appendChild(this.el);
+      }
+      this.el.innerHTML = `<div class="readers-pop-head"><span>Подтверждения прочтения</span><button type="button" class="readers-pop-close" aria-label="Закрыть">✕</button></div><div class="readers-pop-body"><div class="list-empty">Загрузка…</div></div>`;
+      this.el.querySelector(".readers-pop-close").onclick = () => this.hide();
+      this.place(anchor);
+      const key = State.activeChatId + ":" + msgId;
+      let data = this.cache[key];
+      if (!data) {
+        try { data = await API.messageReaders(State.activeChatId, msgId); this.cache[key] = data; }
+        catch (e) {
+          if (this.msgId !== msgId || !this.el) return;
+          this.el.querySelector(".readers-pop-body").innerHTML = `<div class="list-empty">${escapeHtml(e.message)}</div>`;
+          this.place(anchor);
+          return;
+        }
+      }
+      if (this.msgId !== msgId || !this.el) return;
+      const read = data.read || 0;
+      const extra = Math.max(0, read - (data.readers || []).length);
+      const lead = read
+        ? `Это сообщение <span class="readers-accent">${ruReadVerb(read)}</span> ${ruPeople(read)}:`
+        : "Пока никто не прочитал это сообщение";
+      const rows = (data.readers || []).map((u) => {
+        const name = u.full_name || u.username || "";
+        return `<div class="readers-row">
+          ${avatarHtml({ url: u.avatar_url, color: u.avatar_color, name, size: "sm" })}
+          <div class="readers-name">${escapeHtml(name)}</div>
+        </div>`;
+      }).join("");
+      this.el.querySelector(".readers-pop-body").innerHTML =
+        `<div class="readers-lead">${lead}</div>${rows || ""}${extra ? `<div class="readers-more">Ещё ${extra}</div>` : ""}`;
+      this.place(anchor);
+    },
+    place(anchor) {
+      if (!this.el || !anchor || !anchor.getBoundingClientRect) return;
+      const r = anchor.getBoundingClientRect();
+      const w = this.el.offsetWidth || 300;
+      const h = this.el.offsetHeight || 160;
+      let left = r.right - w;
+      let top = r.top - h - 10;
+      if (top < 8) top = Math.min(window.innerHeight - h - 8, r.bottom + 8);
+      if (left < 8) left = 8;
+      if (left + w > window.innerWidth - 8) left = Math.max(8, window.innerWidth - w - 8);
+      this.el.style.left = left + "px";
+      this.el.style.top = top + "px";
+    },
+  };
 
   function messageHtml(m, pool) {
     if (m.is_system) {
@@ -2600,7 +3213,11 @@
     let replyHtml = "";
     if (m.reply_to) {
       const orig = (pool || []).find((x) => x.id === m.reply_to);
-      if (orig) replyHtml = `<div class="msg-reply"><div class="r-name">${escapeHtml(orig.sender_name)}</div><div class="r-text">${escapeHtml((orig.text || "").slice(0, 50))}</div></div>`;
+      const rName = orig ? orig.sender_name : "Сообщение";
+      const rText = orig
+        ? ((orig.text || orig.attachment_name || "Вложение").slice(0, 50))
+        : "Нажмите, чтобы перейти";
+      replyHtml = `<div class="msg-reply" data-goto-msg="${m.reply_to}" title="Перейти к сообщению"><div class="r-name">${escapeHtml(rName)}</div><div class="r-text">${escapeHtml(rText)}</div></div>`;
     }
     let fwdHtml = "";
     if (m.forwarded_from_name) fwdHtml = `<div class="msg-fwd">↪️ Переслано от <b>${escapeHtml(m.forwarded_from_name)}</b></div>`;
@@ -2644,7 +3261,7 @@
           ${reactionsHtml}
           <div class="msg-footer">
             ${m.is_edited && !m.is_deleted ? '<span class="msg-edited">изменено</span>' : ""}
-            ${messageReadInfo(m) ? `<span class="msg-check ${messageReadInfo(m).read ? "read" : "sent"}" title="${messageReadInfo(m).title}${messageReadInfo(m).total > 1 ? ` (${messageReadInfo(m).count}/${messageReadInfo(m).total})` : ""}">${messageReadInfo(m).text}</span>` : ""}
+            ${(() => { const ri = messageReadInfo(m); return ri ? `<span class="msg-check ${ri.read ? "read" : "sent"}${ri.group ? " has-readers" : ""}" title="${escapeAttr(ri.title)}${ri.total > 1 ? ` (${ri.count}/${ri.total})` : ""}">${ri.text}</span>` : ""; })()}
             <span class="msg-time">${formatTime(m.created_at)}</span>
           </div>
           ${actions}
@@ -2709,6 +3326,22 @@
     box.addEventListener("click", (e) => {
       const t = e.target;
       if (!t || typeof t.closest !== "function") return;
+      const readersHit = t.closest(".msg-check.has-readers");
+      if (readersHit) {
+        e.preventDefault();
+        e.stopPropagation();
+        const row = readersHit.closest(".msg-row");
+        const id = row ? parseInt(row.getAttribute("data-msg-id"), 10) : 0;
+        if (id) ReadersPop.open(id, readersHit);
+        return;
+      }
+      const replyJump = t.closest(".msg-reply[data-goto-msg]");
+      if (replyJump) {
+        e.preventDefault();
+        e.stopPropagation();
+        jumpToMessage(parseInt(replyJump.getAttribute("data-goto-msg"), 10));
+        return;
+      }
       const localPath = t.closest(".local-path-link");
       if (localPath) {
         e.preventDefault();
@@ -2766,6 +3399,39 @@
         openOrDownloadFile(url, fname, canOpen);
         return;
       }
+    });
+
+    box.addEventListener("mouseover", (e) => {
+      const t = e.target;
+      if (!t || typeof t.closest !== "function") return;
+      if (!State.activeChat || State.activeChat.type === "private" || isSavedChat(State.activeChat)) return;
+      const row = t.closest(".msg-row.out");
+      if (!row) return;
+      const from = e.relatedTarget;
+      if (from && row.contains(from)) return;
+      const id = parseInt(row.getAttribute("data-msg-id"), 10);
+      if (!id) return;
+      if (ReadersPop.msgId === id && ReadersPop.el) { ReadersPop.clearTimers(); return; }
+      const check = row.querySelector(".msg-check.has-readers");
+      ReadersPop.schedule(id, check || row.querySelector(".msg-bubble") || row, 320);
+    });
+    box.addEventListener("mouseout", (e) => {
+      const t = e.target;
+      if (!t || typeof t.closest !== "function") return;
+      const row = t.closest(".msg-row.out");
+      if (!row) return;
+      const rel = e.relatedTarget;
+      if (rel && row.contains(rel)) return;
+      if (ReadersPop.el && rel && (ReadersPop.el === rel || ReadersPop.el.contains(rel))) return;
+      ReadersPop.scheduleHide();
+    });
+    box.addEventListener("scroll", () => ReadersPop.hide(), { passive: true });
+    document.addEventListener("click", (e) => {
+      if (!ReadersPop.el) return;
+      const t = e.target;
+      if (t && ReadersPop.el.contains(t)) return;
+      if (t && t.closest && t.closest(".msg-check.has-readers")) return;
+      ReadersPop.hide();
     });
 
     box.addEventListener("contextmenu", (e) => {
@@ -2950,7 +3616,7 @@
 
   async function doSend() {
     const input = document.getElementById("composer-input");
-    if (!canWriteActiveChat()) { window.toast("В канал могут писать только администраторы", "error"); return; }
+    if (!canWriteActiveChat()) { window.toast("В канал могут писать только назначенные авторы", "error"); return; }
     const text = input.value.trim();
     const atts = State.pendingAttachments.slice();
 
@@ -2964,34 +3630,41 @@
     }
 
     if (atts.length) {
-      // Wait for uploads still in progress.
-      const stillUploading = atts.some((a) => a.status === "uploading");
+      const stillUploading = atts.some((a) => a.kind !== "path" && a.status === "uploading");
       if (stillUploading) { window.toast("Дождитесь завершения загрузки…"); return; }
-      const ready = atts.filter((a) => a.status === "done" && a.result);
-      if (!ready.length) { window.toast("Файлы не загрузились", "error"); return; }
+      const ready = atts.filter((a) => a.kind !== "path" && a.status === "done" && a.result);
+      const paths = atts.filter((a) => a.kind === "path" && a.path).map((a) => a.path);
+      if (!ready.length && !paths.length) { window.toast("Файлы не загрузились", "error"); return; }
+
+      const pathText = paths.join("\n");
+      const firstText = [text, pathText].filter(Boolean).join("\n\n");
+      if (firstText.length > 15000) { window.toast("Сообщение слишком длинное (макс. 15000 символов)", "error"); return; }
 
       input.value = ""; input.style.setProperty("--composer-input-height", "44px");
       clearAttachments();
       const replyTo = State.replyTo;
       clearReply();
+      applySentPreview(State.activeChatId, firstText || "📎 Файл");
       try {
-        // first attachment carries the caption; the rest go as bare attachments
-        for (let i = 0; i < ready.length; i++) {
-          const r = ready[i].result;
-          await API.sendMessage(State.activeChatId, {
-            text: i === 0 ? text : "",
-            reply_to: i === 0 ? replyTo : null,
-            attachment_kind: r.kind,
-            attachment_url: r.url,
-            attachment_thumb: r.thumb || "",
-            attachment_name: r.name || "",
-            attachment_size: r.size || 0,
-            attachment_w: r.width || 0,
-            attachment_h: r.height || 0,
-            importance: i === 0 ? State.composerImportance : "normal",
-          });
+        if (ready.length) {
+          for (let i = 0; i < ready.length; i++) {
+            const r = ready[i].result;
+            await API.sendMessage(State.activeChatId, {
+              text: i === 0 ? firstText : "",
+              reply_to: i === 0 ? replyTo : null,
+              attachment_kind: r.kind,
+              attachment_url: r.url,
+              attachment_thumb: r.thumb || "",
+              attachment_name: r.name || "",
+              attachment_size: r.size || 0,
+              attachment_w: r.width || 0,
+              attachment_h: r.height || 0,
+              importance: i === 0 ? State.composerImportance : "normal",
+            });
+          }
+        } else {
+          await API.sendMessage(State.activeChatId, { text: firstText, reply_to: replyTo, importance: State.composerImportance });
         }
-        Drafts.clear(State.activeChatId);
         if (State.pendingEmptyPrivateChatId === State.activeChatId) State.pendingEmptyPrivateChatId = null;
         State.composerImportance = "normal"; const imp = document.getElementById("importance-select"); if (imp) imp.value = "normal";
       } catch (err) { window.toast(err.message, "error"); }
@@ -2999,18 +3672,30 @@
     }
 
     if (!text) return;
+    if (text.length > 15000) { window.toast("Сообщение слишком длинное (макс. 15000 символов)", "error"); return; }
     input.value = ""; input.style.setProperty("--composer-input-height", "44px");
+    applySentPreview(State.activeChatId, text);
     try {
       await API.sendMessage(State.activeChatId, { text, reply_to: State.replyTo, importance: State.composerImportance });
-      Drafts.clear(State.activeChatId);
       if (State.pendingEmptyPrivateChatId === State.activeChatId) State.pendingEmptyPrivateChatId = null;
       clearReply();
       State.composerImportance = "normal"; const imp = document.getElementById("importance-select"); if (imp) imp.value = "normal";
-    } catch (err) { window.toast(err.message, "error"); input.value = text; }
+    } catch (err) {
+      window.toast(err.message, "error");
+      input.value = text;
+      Drafts.set(State.activeChatId, text);
+      const c = (State.chats || []).find((x) => x.id === State.activeChatId);
+      if (c) patchChatListRow(c, false);
+    }
   }
 
+  let _typingSentAt = 0;
   function sendTyping() {
-    if (State.ws && State.ws.readyState === 1) State.ws.send(JSON.stringify({ type: "typing", chat_id: State.activeChatId }));
+    if (!State.activeChatId || !State.ws || State.ws.readyState !== 1) return;
+    const now = Date.now();
+    if (now - _typingSentAt < 2500) return;
+    _typingSentAt = now;
+    State.ws.send(JSON.stringify({ type: "typing", chat_id: State.activeChatId }));
   }
   function showTyping(username) {
     const el = document.getElementById("typing-indicator"); if (!el) return;
@@ -3019,21 +3704,29 @@
     State.typingClear = setTimeout(() => { el.textContent = ""; }, 2500);
   }
   function updatePresence(userId, online, status) {
-    if (status) State.statusMap[userId] = online ? status : "offline";
-    if (State.activeChat) {
-      const m = State.activeChat.members.find((x) => x.id === userId);
+    rememberStatus(userId, status, online);
+    if (State.activeChat && State.activeChat.members) {
+      const m = (State.activeChat.members || []).find((x) => x.id === userId);
       if (m) { m.is_online = online; m.status = online ? (status || "online") : "offline"; updateChatHeader(); }
     }
-    State.chats.forEach((c) => c.members && c.members.forEach((m) => { if (m.id === userId) { m.is_online = online; m.status = online ? (status || "online") : "offline"; } }));
+    const chats = State.chats || [];
+    for (let i = 0; i < chats.length; i++) {
+      const mems = chats[i].members;
+      if (!mems) continue;
+      for (let j = 0; j < mems.length; j++) {
+        if (mems[j].id === userId) {
+          mems[j].is_online = online;
+          mems[j].status = online ? (status || "online") : "offline";
+        }
+      }
+    }
+    if (State.allUsers) {
+      const u = State.allUsers.find((x) => x.id === userId);
+      if (u) { u.is_online = online; u.status = online ? (status || "online") : "offline"; }
+    }
     updatePresenceDom(userId, online, status);
+    patchRightSidebarPresence(userId, online, status);
     try { window.dispatchEvent(new CustomEvent("cc:presence", { detail: { userId, online, status: status || (online ? "online" : "offline") } })); } catch (e) {}
-    if (Router.currentPath().startsWith("/chats")) renderChatList(State.chats);
-    // refresh the online sidebar (debounced to avoid thrashing on bursts)
-    clearTimeout(State.rsRefreshTimer);
-    State.rsRefreshTimer = setTimeout(() => {
-      const rs = document.getElementById("rs-search");
-      loadRightSidebar(rs ? rs.value.trim() : "");
-    }, 400);
   }
 
   function updatePresenceDom(userId, online, status) {
@@ -3041,18 +3734,8 @@
     document.querySelectorAll(`.org-member[data-uid="${userId}"]`).forEach((row) => {
       const wasOnline = row.getAttribute("data-online") === "1";
       row.setAttribute("data-online", online ? "1" : "0");
-      const av = row.querySelector(".avatar");
-      if (av) {
-        let dot = av.querySelector(".online-dot");
-        if (online) {
-          if (!dot) { dot = document.createElement("span"); dot.className = "online-dot"; av.appendChild(dot); }
-          dot.classList.toggle("away", status === "away");
-          dot.classList.toggle("dnd", status === "dnd");
-          dot.classList.toggle("online", status === "online" || !status);
-        } else if (dot) {
-          dot.remove();
-        }
-      }
+      applyPresenceClass(row, online, status);
+      applyOnlineDot(row.querySelector(".avatar"), online, status);
       const dept = row.closest(".org-dept");
       const cnt = dept && dept.querySelector(".org-dept-count b");
       if (cnt && wasOnline !== !!online) {
@@ -3063,19 +3746,9 @@
 
     // Any visible contact/right-sidebar/chat-list/user-card elements with the same data attr.
     document.querySelectorAll(`[data-live-user="${userId}"]`).forEach((el) => {
-      el.classList.remove("presence-online", "presence-away", "presence-dnd", "presence-offline", "offline");
-      const cls = statusDotClass(status || "online", online);
-      el.classList.add("presence-" + cls);
-      if (!online) el.classList.add("offline");
+      applyPresenceClass(el, online, status);
       const av = el.classList.contains("avatar") ? el : el.querySelector(".avatar");
-      if (!av) return;
-      let dot = av.querySelector(".online-dot");
-      if (online) {
-        if (!dot) { dot = document.createElement("span"); dot.className = "online-dot"; av.appendChild(dot); }
-        dot.classList.toggle("away", status === "away");
-        dot.classList.toggle("dnd", status === "dnd");
-        dot.classList.toggle("online", status === "online" || !status);
-      } else if (dot) dot.remove();
+      applyOnlineDot(av, online, status);
     });
   }
 
@@ -3102,21 +3775,49 @@
   function resetIdle() { if (State._resetIdle) State._resetIdle(); }
   function scrollMessages() { const box = document.getElementById("messages"); if (box) box.scrollTop = box.scrollHeight; }
 
+  function isChatActuallyViewed() {
+    try {
+      if (document.hidden) return false;
+      if (document.visibilityState && document.visibilityState !== "visible") return false;
+      if (typeof document.hasFocus === "function" && !document.hasFocus()) return false;
+    } catch (e) {}
+    return true;
+  }
+  let _markReadAt = 0;
+  function maybeMarkActiveChatRead() {
+    const chatId = State.activeChatId;
+    if (!chatId || !isChatActuallyViewed()) return;
+    const now = Date.now();
+    if (now - _markReadAt < 400) return;
+    _markReadAt = now;
+    API.markRead(chatId).then((r) => {
+      if (String(State.activeChatId) !== String(chatId)) return;
+      if (State.activeChat && r && r.last_read_message_id) State.activeChat.last_read_message_id = r.last_read_message_id;
+      const c = (State.chats || []).find((x) => x.id === chatId);
+      if (c) {
+        c.unread = 0;
+        patchChatListRow(c, false);
+      }
+      try { updateUnreadIndicator(); } catch (e) {}
+    }).catch(() => {});
+  }
+
+  function isWindowVisible() {
+    try {
+      if (document.hidden) return false;
+      if (document.visibilityState && document.visibilityState !== "visible") return false;
+    } catch (e) {}
+    return true;
+  }
+
   function notifyIncoming(m) {
     const p = Prefs.all();
-
-    // Is the user actively looking at THIS chat in a focused window?
-    const viewingThisChat = (m.chat_id === State.activeChatId) && !document.hidden && document.hasFocus();
-
     if (p.manualStatus === "dnd") return;
-    // Sound: play unless the user is actively watching this chat.
-    if (p.sound && !viewingThisChat) playMessageSound();
-
-    // Desktop/browser notification: show when the user is NOT actively
-    // viewing this chat (window hidden, unfocused, or a different chat open).
-    // This works on every PC, including the desktop app window in background.
-    if (!p.notify || viewingThisChat) return;
-    if (!("Notification" in window)) return;
+    // Window is open on screen → no sound / toast / OS notification.
+    // Minimized / hidden → notify about incoming messages.
+    if (isWindowVisible()) return;
+    if (p.sound) playMessageSound();
+    if (!p.notify) return;
 
     let body = "";
     if (p.notifyPreview) {
@@ -3127,6 +3828,8 @@
       body = "Новое сообщение";
     }
     const title = m.sender_name || "Новое сообщение";
+    window.toast((title + ": " + (body || "Новое сообщение")).slice(0, 140), "message");
+    if (!("Notification" in window)) return;
 
     function show() {
       try {
@@ -3140,6 +3843,7 @@
           if (m.chat_id) Router.navigate("/chats/" + m.chat_id);
           n.close();
         };
+        closeNoticeLater(n, "cc-chat-" + m.chat_id);
       } catch (e) {
         // Some engines require the ServiceWorker API for notifications.
         if (navigator.serviceWorker && navigator.serviceWorker.ready) {
@@ -3196,14 +3900,217 @@
   const IMAGE_MIME = /^image\//;
   let tempCounter = 0;
 
+  function fileUrlToPath(uri) {
+    let path = String(uri || "").trim();
+    try { path = decodeURIComponent(path.replace(/^file:\/\/\/?/i, "")); } catch (e) { path = path.replace(/^file:\/\/\/?/i, ""); }
+    if (/^\/[A-Za-z]:/.test(path)) path = path.slice(1);
+    return path.replace(/\//g, "\\");
+  }
+  function isFullWindowsPath(p) {
+    p = String(p || "").trim();
+    if (!p) return false;
+    if (/^file:/i.test(p)) return true;
+    if (/^[A-Za-z]:[\\/]/.test(p)) return true;
+    if (/^\\\\[^\\/]/.test(p)) return true;
+    return false;
+  }
+  function isDesktopShell() {
+    try {
+      if (window.CorporateChatDesktop) return true;
+      if (window.chrome && window.chrome.webview) return true;
+    } catch (e) {}
+    return false;
+  }
+  function dropModeFromEvent(e) {
+    const z = document.elementFromPoint(e.clientX, e.clientY);
+    const zone = z && z.closest("[data-drop]");
+    return (zone && zone.getAttribute("data-drop")) || "file";
+  }
+  function pathsFromDataTransfer(dt) {
+    const out = [];
+    if (!dt) return out;
+    const push = (p) => {
+      p = String(p || "").trim();
+      if (/^file:/i.test(p)) p = fileUrlToPath(p);
+      if (isFullWindowsPath(p) && out.indexOf(p) < 0) out.push(p);
+    };
+    try {
+      const uri = dt.getData("text/uri-list") || "";
+      uri.split(/\r?\n/).forEach((line) => {
+        line = line.trim();
+        if (!line || line.charAt(0) === "#") return;
+        push(line);
+      });
+    } catch (e) {}
+    try {
+      const plain = dt.getData("text/plain") || dt.getData("text") || "";
+      plain.split(/\r?\n/).forEach((line) => { push(line.trim()); });
+    } catch (e) {}
+    Array.from(dt.files || []).forEach((f) => { if (f && f.path) push(f.path); });
+    return out;
+  }
+  function cachedNativePaths() {
+    const list = (window.__nativeDropPaths || []).map(String).filter(isFullWindowsPath);
+    if (!list.length) return [];
+    const at = window.__nativeDropPathsAt || 0;
+    if (at && Date.now() - at > 12000) return [];
+    return list;
+  }
+  function waitForNativePaths(ms) {
+    return new Promise((resolve) => {
+      const start = Date.now();
+      const tick = () => {
+        const p = cachedNativePaths();
+        if (p.length) { resolve(p); return; }
+        if (Date.now() - start >= ms) { resolve([]); return; }
+        setTimeout(tick, 30);
+      };
+      tick();
+    });
+  }
+  function pathZoneRect() {
+    const el = document.getElementById("drop-zone-path");
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { x: r.left, y: r.top, w: r.width, h: r.height };
+  }
+  let _lastFileDragNotify = 0;
+  function notifyNativeFileDrag(over, force) {
+    if (!isDesktopShell()) return;
+    const now = Date.now();
+    if (over && !force && now - _lastFileDragNotify < 80) return;
+    if (over) _lastFileDragNotify = now;
+    const payload = { over: !!over };
+    if (over) {
+      const r = pathZoneRect();
+      if (r) Object.assign(payload, r);
+      else return;
+    }
+    try {
+      const D = window.CorporateChatDesktop;
+      if (D && typeof D.fileDrag === "function") { D.fileDrag(payload); return; }
+      if (window.chrome && chrome.webview && typeof chrome.webview.postMessage === "function") {
+        chrome.webview.postMessage(Object.assign({ type: "fileDrag" }, payload));
+      }
+    } catch (e) {}
+  }
+  function applyNativeDropPaths(paths, commit) {
+    const full = (paths || []).map(String).filter(isFullWindowsPath);
+    if (full.length) {
+      window.__nativeDropPaths = full;
+      window.__nativeDropPathsAt = Date.now();
+    }
+    if (!commit || !full.length) return;
+    finishDropUi();
+    consumeDropEvent();
+    const ask = document.getElementById("path-ask");
+    if (ask) ask.remove();
+    full.forEach(addPathAttachment);
+  }
+  function initNativeDropBridge() {
+    const bind = () => {
+      try {
+        if (!window.chrome || !chrome.webview || typeof chrome.webview.addEventListener !== "function") return;
+        if (window.__nativeDropBound) return;
+        window.__nativeDropBound = true;
+        chrome.webview.addEventListener("message", (ev) => {
+          let d = ev && ev.data;
+          if (typeof d === "string") { try { d = JSON.parse(d); } catch (e) { return; } }
+          if (!d || !d.type) return;
+          if (d.type === "fileDragEnded") { finishDropUi(); return; }
+          if (d.type !== "nativeDropPaths") return;
+          applyNativeDropPaths(d.paths || [], !!d.commit);
+        });
+      } catch (e) {}
+    };
+    bind();
+    window.addEventListener("CorporateChatDesktopReady", bind);
+  }
+  function addPathAttachment(path) {
+    path = String(path || "").trim();
+    if (!path) return;
+    if (State.pendingAttachments.some((a) => a.kind === "path" && a.path === path)) return;
+    State.pendingAttachments.push({
+      tempId: "path" + (++tempCounter),
+      kind: "path",
+      status: "done",
+      path: path,
+      file: { name: path },
+    });
+    renderAttachPreview();
+  }
+  async function handleDroppedPaths(dt) {
+    let paths = pathsFromDataTransfer(dt);
+    if (!paths.length) paths = cachedNativePaths().slice();
+    if (!paths.length && isDesktopShell()) {
+      notifyNativeFileDrag(true, true);
+      paths = await waitForNativePaths(280);
+    }
+    if (paths.length) { paths.forEach(addPathAttachment); return; }
+    askLocalPath("");
+  }
+  function openAttachChooser(anchor, fileInput) {
+    const old = document.getElementById("attach-chooser");
+    if (old) old.remove();
+    const pop = document.createElement("div");
+    pop.id = "attach-chooser";
+    pop.className = "attach-chooser";
+    pop.innerHTML = `
+      <button type="button" data-att="file"><b>📎 Файл</b><span>Загрузить в чат</span></button>
+      <button type="button" data-att="path"><b>📂 Путь</b><span>Ссылка на диск, без загрузки</span></button>`;
+    document.body.appendChild(pop);
+    const r = anchor.getBoundingClientRect();
+    pop.style.left = Math.max(8, Math.min(window.innerWidth - 280, r.left)) + "px";
+    pop.style.top = Math.max(8, r.top - pop.offsetHeight - 8) + "px";
+    pop.querySelectorAll("button").forEach((b) => {
+      b.addEventListener("click", () => {
+        const mode = b.getAttribute("data-att");
+        pop.remove();
+        if (mode === "file") fileInput.click();
+        else askLocalPath();
+      });
+    });
+    setTimeout(() => {
+      const close = (ev) => { if (!pop.contains(ev.target)) { pop.remove(); document.removeEventListener("mousedown", close); } };
+      document.addEventListener("mousedown", close);
+    }, 0);
+  }
+  function askLocalPath(hint) {
+    if (!isFullWindowsPath(hint)) hint = "";
+    let wrap = document.getElementById("path-ask");
+    if (wrap) { const i = wrap.querySelector("input"); if (i) { if (hint && !i.value) i.value = hint; i.focus(); } return; }
+    wrap = document.createElement("div");
+    wrap.id = "path-ask";
+    wrap.className = "path-ask";
+    wrap.innerHTML = `<input id="path-ask-input" placeholder="O:\\Папка\\файл.docx  или  \\\\server\\share" value="${escapeAttr(hint || "")}" />
+      <button type="button" class="btn-primary inline" id="path-ask-ok">Добавить</button>
+      <button type="button" class="icon-btn" id="path-ask-x" title="Закрыть">✕</button>`;
+    const preview = document.getElementById("attach-preview");
+    const composer = document.getElementById("composer");
+    if (preview && preview.parentNode) preview.parentNode.insertBefore(wrap, preview);
+    else if (composer) composer.insertBefore(wrap, composer.firstChild);
+    const input = document.getElementById("path-ask-input");
+    const go = () => {
+      const v = (input.value || "").trim();
+      if (!v) return;
+      addPathAttachment(v);
+      wrap.remove();
+    };
+    document.getElementById("path-ask-ok").addEventListener("click", go);
+    document.getElementById("path-ask-x").addEventListener("click", () => wrap.remove());
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
+    input.focus();
+  }
+
   function initAttachments() {
     State.pendingAttachments = [];
+    initNativeDropBridge();
     const attachBtn = document.getElementById("attach-btn");
     const fileInput = document.getElementById("file-input");
     const composer = document.getElementById("composer");
     const input = document.getElementById("composer-input");
 
-    attachBtn.addEventListener("click", () => fileInput.click());
+    attachBtn.addEventListener("click", (e) => { e.preventDefault(); openAttachChooser(attachBtn, fileInput); });
     fileInput.addEventListener("change", () => {
       handleFiles(Array.from(fileInput.files || []));
       fileInput.value = "";
@@ -3228,10 +4135,16 @@
     });
     composer.addEventListener("drop", (e) => {
       e.preventDefault();
-      e.stopPropagation();   // don't let the chat-area handler fire too (double upload)
-      composer.classList.remove("drag-active");
-      const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
-      if (files.length) handleFiles(files);
+      e.stopPropagation();
+      const overlay = document.getElementById("drop-overlay");
+      const mode = (overlay && overlay.classList.contains("show")) ? dropModeFromEvent(e) : "file";
+      finishDropUi();
+      if (!consumeDropEvent()) return;
+      if (mode === "path") handleDroppedPaths(e.dataTransfer);
+      else {
+        const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+        if (files.length) handleFiles(files);
+      }
     });
 
     // drag & drop onto the ENTIRE chat area (messages, header, etc.) — shows a
@@ -3251,25 +4164,44 @@
         e.preventDefault();
         dragDepth++;
         dropOverlay.classList.add("show");
+        notifyNativeFileDrag(true, dragDepth === 1);
       });
       chatArea.addEventListener("dragover", (e) => {
         if (!hasFiles(e)) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = "copy";
+        const z = document.elementFromPoint(e.clientX, e.clientY);
+        const zone = z && z.closest("[data-drop]");
+        dropOverlay.querySelectorAll(".drop-zone").forEach((el) => el.classList.toggle("hot", el === zone));
+        notifyNativeFileDrag(true);
       });
       chatArea.addEventListener("dragleave", (e) => {
         if (!hasFiles(e)) return;
         dragDepth--;
-        if (dragDepth <= 0) { dragDepth = 0; dropOverlay.classList.remove("show"); }
+        if (dragDepth <= 0) {
+          dragDepth = 0;
+          // Desktop: the native path catcher is a separate HWND over the
+          // path zone. Moving onto it looks like a leave from WebView2 —
+          // do not hide/park, or the drop would lose the real D:\ path.
+          if (!isDesktopShell()) {
+            dropOverlay.classList.remove("show");
+            dropOverlay.querySelectorAll(".drop-zone").forEach((el) => el.classList.remove("hot"));
+          }
+        }
       });
       chatArea.addEventListener("drop", (e) => {
         if (!hasFiles(e)) return;
         e.preventDefault();
+        e.stopPropagation();
         dragDepth = 0;
-        dropOverlay.classList.remove("show");
-        composer.classList.remove("drag-active");
-        const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
-        if (files.length) handleFiles(files);
+        const mode = dropModeFromEvent(e);
+        finishDropUi();
+        if (!consumeDropEvent()) return;
+        if (mode === "path") handleDroppedPaths(e.dataTransfer);
+        else {
+          const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+          if (files.length) handleFiles(files);
+        }
       });
     }
   }
@@ -3277,10 +4209,53 @@
   function fileSig(file) {
     return [file.name || "file", file.size || 0, file.lastModified || 0, file.type || ""].join("|");
   }
+  function isDroppedFolder(file) {
+    if (!file) return false;
+    if (file.isDirectory) return true;
+    // Explorer folders: empty MIME and zero size (or 4K cluster).
+    if (!file.type && file.size === 0) return true;
+    return false;
+  }
+  let _dropLockAt = 0;
+  function consumeDropEvent() {
+    const now = Date.now();
+    if (now - _dropLockAt < 500) return false;
+    _dropLockAt = now;
+    return true;
+  }
+  let _finishingDropUi = false;
+  function finishDropUi() {
+    if (_finishingDropUi) return;
+    _finishingDropUi = true;
+    try {
+      const overlay = document.getElementById("drop-overlay");
+      if (overlay) {
+        overlay.classList.remove("show");
+        overlay.querySelectorAll(".drop-zone").forEach((el) => el.classList.remove("hot"));
+      }
+      const composer = document.getElementById("composer");
+      if (composer) composer.classList.remove("drag-active");
+      notifyNativeFileDrag(false, true);
+    } finally { _finishingDropUi = false; }
+  }
 
   function handleFiles(files) {
     const now = Date.now();
     files.forEach((file) => {
+      if (isDroppedFolder(file)) {
+        const cached = cachedNativePaths();
+        if (cached.length) {
+          const name = file.name || "";
+          const match = cached.filter((p) => {
+            const base = p.replace(/[\\/]+$/, "").split(/[\\/]/).pop();
+            return !name || base === name;
+          });
+          (match.length ? match : cached).forEach(addPathAttachment);
+          return;
+        }
+        askLocalPath("");
+        return;
+      }
       const sig = fileSig(file);
       // Some browsers fire both the composer and chat-area drop handlers for
       // the same drag operation. Also protect against accidental double-drop of
@@ -3314,6 +4289,13 @@
     if (!State.pendingAttachments.length) { box.classList.remove("show"); box.innerHTML = ""; return; }
     box.classList.add("show");
     box.innerHTML = State.pendingAttachments.map((a) => {
+      if (a.kind === "path") {
+        return `<div class="att-item path" data-temp="${a.tempId}">
+          <div class="att-thumb file">📂</div>
+          <div class="att-info"><div class="att-name">${escapeHtml(a.path)}</div><span class="att-ok">путь</span></div>
+          <button class="att-remove" data-remove="${a.tempId}" title="Убрать">✕</button>
+        </div>`;
+      }
       const thumb = a.kind === "image" && a.preview
         ? `<img class="att-thumb" src="${a.preview}" alt="" />`
         : `<div class="att-thumb file">${a.kind === "image" ? "🖼️" : "📄"}</div>`;
@@ -3391,6 +4373,129 @@
   }
 
   // ---------- New chat / group modal ----------
+  // Lightweight virtualized user picker (no avatar images, no full-list repaint).
+  function mountUserPicker(opts) {
+    const listEl = opts.listEl;
+    const selected = opts.selected;
+    const existingIds = opts.existingIds || new Set();
+    const onChange = opts.onChange || function () {};
+    const pickAllBtn = opts.pickAllBtn || null;
+    const emptyText = opts.emptyText || "Пользователи не найдены";
+    const addAllRef = opts.addAllRef || { on: false };
+    let totalCount = opts.totalCount || 0;
+    const ROW_H = 48;
+    const VIEW_H = 360;
+    let listed = [];
+    let allUsers = [];
+
+    function isSel(id) { return addAllRef.on || selected.has(id); }
+
+    function rowHtml(u) {
+      const name = u.full_name || u.username || "";
+      const sel = isSel(u.id);
+      const ini = initials(name);
+      const bg = u.avatar_color || "#3390ec";
+      return `<div class="user-pick-item${sel ? " selected" : ""}" data-id="${u.id}">
+        <div class="avatar sm" style="background:${escapeAttr(bg)}">${escapeHtml(ini)}</div>
+        <div class="user-pick-name"><div class="un">${escapeHtml(name)}</div><div class="uh">@${escapeHtml(u.username || "")}</div></div>
+        ${sel ? '<span class="checkmark">✓</span>' : ""}
+      </div>`;
+    }
+
+    function paint() {
+      if (!listed.length) {
+        listEl.onscroll = null;
+        listEl.style.height = "";
+        listEl.innerHTML = `<div class="list-empty">${emptyText}</div>`;
+        return;
+      }
+      const virt = listed.length > 50;
+      if (!virt) {
+        listEl.onscroll = null;
+        listEl.style.height = "";
+        listEl.innerHTML = listed.map(rowHtml).join("");
+        return;
+      }
+      listEl.style.height = VIEW_H + "px";
+      const renderWindow = () => {
+        const start = Math.max(0, Math.floor((listEl.scrollTop || 0) / ROW_H) - 6);
+        const end = Math.min(listed.length, start + Math.ceil(VIEW_H / ROW_H) + 12);
+        const padTop = start * ROW_H;
+        const padBot = (listed.length - end) * ROW_H;
+        listEl.innerHTML = `<div class="pick-spacer" style="height:${padTop}px"></div>` +
+          listed.slice(start, end).map(rowHtml).join("") +
+          `<div class="pick-spacer" style="height:${padBot}px"></div>`;
+      };
+      listEl.onscroll = renderWindow;
+      renderWindow();
+    }
+
+    function pool() { return allUsers.length ? allUsers : listed; }
+
+    function syncPickAll() {
+      if (!pickAllBtn) return;
+      const n = totalCount || pool().length;
+      pickAllBtn.textContent = addAllRef.on ? "Снять всех" : ("Добавить всех" + (n ? " · " + n : ""));
+    }
+    function setTotalCount(n) { totalCount = n || 0; syncPickAll(); }
+
+    listEl.addEventListener("click", (e) => {
+      const el = e.target && e.target.closest && e.target.closest(".user-pick-item");
+      if (!el) return;
+      const id = parseInt(el.getAttribute("data-id"), 10);
+      if (!id) return;
+      if (addAllRef.on) {
+        return;
+      }
+      if (selected.has(id)) {
+        selected.delete(id);
+        el.classList.remove("selected");
+        const mark = el.querySelector(".checkmark");
+        if (mark) mark.remove();
+      } else {
+        selected.add(id);
+        el.classList.add("selected");
+        if (!el.querySelector(".checkmark")) el.insertAdjacentHTML("beforeend", '<span class="checkmark">✓</span>');
+      }
+      syncPickAll();
+      onChange();
+    });
+
+    if (pickAllBtn) {
+      pickAllBtn.addEventListener("click", () => {
+        addAllRef.on = !addAllRef.on;
+        selected.clear();
+        if (!listed.length) {
+          listEl.onscroll = null;
+          listEl.style.height = "";
+          listEl.innerHTML = addAllRef.on
+            ? `<div class="list-empty">Будут добавлены все пользователи. Можно сразу нажать «Создать».</div>`
+            : `<div class="list-empty">${opts.hint || "Введите имя, чтобы найти людей.<br>Или нажмите «Добавить всех»."}</div>`;
+        } else {
+          paint();
+        }
+        syncPickAll();
+        onChange();
+      });
+    }
+
+    async function load(q) {
+      q = (q || "").trim();
+      let users = [];
+      try { users = await API.searchUsersLite(q, q ? 80 : 2000); } catch (e) {
+        try { users = await API.searchUsers(q, q ? 80 : 1000); } catch (e2) {}
+      }
+      users = users.filter((u) => !existingIds.has(u.id));
+      if (!q) allUsers = users;
+      listed = users;
+      listEl.scrollTop = 0;
+      paint();
+      syncPickAll();
+    }
+
+    return { load, syncPickAll, paint, addAllRef, setTotalCount };
+  }
+
   async function openNewChatModal(groupMode, channelMode) {
     channelMode = !!channelMode;
     const overlay = document.getElementById("modal-overlay");
@@ -3405,6 +4510,7 @@
             <input type="text" id="group-name" placeholder="${channelMode ? "Например: Объявления компании" : "Например: Команда разработки"}" />
           </div>
           <div class="field"><input type="text" id="user-search" placeholder="${channelMode ? "Добавить подписчиков из пользователей..." : "Поиск пользователей..."}" /></div>
+          ${(groupMode || channelMode) && State.me && State.me.role === "admin" ? '<div class="user-pick-toolbar"><button type="button" class="btn-secondary" id="pick-all">Добавить всех</button></div>' : ""}
           <div id="user-pick-list"></div>
         </div>
         <div class="modal-footer">
@@ -3414,61 +4520,74 @@
       </div>`;
     overlay.classList.add("show");
     const selected = new Set();
+    const addAllRef = { on: false };
     const searchInput = document.getElementById("user-search");
     const listEl = document.getElementById("user-pick-list");
     const createBtn = document.getElementById("modal-create");
     const groupField = document.getElementById("group-name-field");
+    const pickAllBtn = document.getElementById("pick-all");
     function close() { overlay.classList.remove("show"); overlay.innerHTML = ""; }
     overlay.querySelector(".modal-close").addEventListener("click", close);
     document.getElementById("modal-cancel").addEventListener("click", close);
     overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
 
-    async function renderUsers(q) {
-      let users = [];
-      try { users = await API.searchUsers(q); } catch (e) {}
-      if (!users.length) { listEl.innerHTML = `<div class="list-empty">Пользователи не найдены</div>`; return; }
-      listEl.innerHTML = users.map((u) => `
-        <div class="user-pick-item ${selected.has(u.id) ? "selected" : ""}" data-id="${u.id}">
-          ${avatarHtml({ url: u.avatar_url, color: u.avatar_color, name: u.full_name || u.username, size: "sm" })}
-          <div class="user-pick-name"><div class="un">${escapeHtml(u.full_name || u.username)}</div><div class="uh">@${escapeHtml(u.username)}</div></div>
-          ${selected.has(u.id) ? '<span class="checkmark">✓</span>' : ""}
-        </div>`).join("");
-      listEl.querySelectorAll(".user-pick-item").forEach((el) => el.addEventListener("click", () => {
-        const id = parseInt(el.getAttribute("data-id"), 10);
-        if (selected.has(id)) selected.delete(id); else selected.add(id);
-        update(); renderUsers(searchInput.value.trim());
-      }));
-    }
     function update() {
       const nameEl = document.getElementById("group-name");
-      createBtn.disabled = channelMode ? !(nameEl && nameEl.value.trim()) : selected.size === 0;
+      const busy = createBtn.dataset.busy === "1";
+      const n = addAllRef.on ? "все" : selected.size;
+      const hasSel = addAllRef.on || selected.size > 0;
+      createBtn.disabled = busy || (channelMode ? !(nameEl && nameEl.value.trim()) : !hasSel);
+      if (!busy) createBtn.textContent = hasSel ? ("Создать · " + n) : "Создать";
       if (groupMode || channelMode) groupField.style.display = "block";
-      else groupField.style.display = selected.size > 1 ? "block" : "none";
+      else groupField.style.display = (addAllRef.on || selected.size > 1) ? "block" : "none";
     }
+    const picker = mountUserPicker({
+      listEl, selected, pickAllBtn, addAllRef, onChange: update,
+      emptyText: "Пользователи не найдены",
+    });
     let t = null;
-    searchInput.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => renderUsers(searchInput.value.trim()), 250); });
+    searchInput.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => picker.load(searchInput.value.trim()), 250); });
     const groupNameInput = document.getElementById("group-name");
     if (groupNameInput) groupNameInput.addEventListener("input", update);
-    renderUsers("");
+    picker.load("");
+    API.usersCount().then((r) => picker.setTotalCount((r && r.count) || 0)).catch(() => {});
     createBtn.addEventListener("click", async () => {
-      const ids = Array.from(selected);
+      if (createBtn.dataset.busy === "1") return;
+      const ids = addAllRef.on ? [] : Array.from(selected);
+      const wantGroup = groupMode || addAllRef.on || ids.length > 1;
+      if (channelMode) {
+        const name = document.getElementById("group-name").value.trim();
+        if (!name) { window.toast("Введите название канала", "error"); return; }
+      }
+      createBtn.dataset.busy = "1";
+      createBtn.disabled = true;
+      createBtn.textContent = "Создание…";
       try {
         let chat;
-        const wantGroup = groupMode || ids.length > 1;
+        const payloadExtra = { member_ids: ids, add_all: !!addAllRef.on };
         if (channelMode) {
           const name = document.getElementById("group-name").value.trim();
-          if (!name) { window.toast("Введите название канала", "error"); return; }
-          chat = await API.createChat({ type: "channel", name, member_ids: ids });
+          chat = await API.createChat({ type: "channel", name, ...payloadExtra });
         } else if (!wantGroup) {
           await cleanupPendingEmptyPrivateChat(true);
           chat = await API.createChat({ type: "private", member_ids: ids });
           State.pendingEmptyPrivateChatId = chat.is_new ? chat.id : null;
         } else {
           const name = document.getElementById("group-name").value.trim() || "Группа";
-          chat = await API.createChat({ type: "group", name, member_ids: ids });
+          chat = await API.createChat({ type: "group", name, ...payloadExtra });
         }
-        close(); await loadChats(); Router.navigate("/chats/" + chat.id);
-      } catch (err) { window.toast(err.message, "error"); }
+        close();
+        if (chat && chat.id) {
+          const chats = State.chats || [];
+          if (!chats.some((c) => c.id === chat.id)) State.chats = [chat].concat(chats);
+          renderChatList(State.chats || []);
+        }
+        Router.navigate("/chats/" + chat.id);
+      } catch (err) {
+        window.toast(err.message, "error");
+        createBtn.dataset.busy = "0";
+        update();
+      }
     });
   }
 
@@ -3491,8 +4610,7 @@
     const selected = new Set();
     const writableChats = State.chats.filter((c) => {
       if (c.type !== "channel") return true;
-      const me = (c.members || []).find((m) => m.id === State.me.id);
-      return State.me.role === "admin" || !!(me && me.is_chat_admin);
+      return isChannelWriter(c);
     });
     list.innerHTML = writableChats.map((c) => `
       <label class="user-pick-item" data-id="${c.id}">
@@ -3791,8 +4909,10 @@
             <label class="switch"><input type="checkbox" id="set-sound" ${p.sound ? "checked" : ""}><span class="slider"></span></label></div>
           <div class="settings-row"><div><div class="settings-label">Уведомления</div><div class="settings-sub">Всплывающие при сворачивании</div></div>
             <label class="switch"><input type="checkbox" id="set-notify" ${p.notify ? "checked" : ""}><span class="slider"></span></label></div>
-          <div class="settings-row"><div><div class="settings-label">Уведомления о звонках</div><div class="settings-sub">Входящие и пропущенные вызовы Windows/браузера</div></div>
+          <div class="settings-row"><div><div class="settings-label">Уведомления о звонках</div><div class="settings-sub">Входящие вызовы Windows/браузера</div></div>
             <label class="switch"><input type="checkbox" id="set-notify-calls" ${p.notifyCalls ? "checked" : ""}><span class="slider"></span></label></div>
+          <div class="settings-row"><div><div class="settings-label">Пропущенные вызовы</div><div class="settings-sub">Бейдж, тосты, вкладка и панель задач — веб и десктоп</div></div>
+            <label class="switch"><input type="checkbox" id="set-missed-alerts" ${p.missedCallAlerts !== false ? "checked" : ""}><span class="slider"></span></label></div>
           <div class="settings-row"><div><div class="settings-label">Текст в уведомлении</div><div class="settings-sub">Показывать содержимое сообщения</div></div>
             <label class="switch"><input type="checkbox" id="set-preview" ${p.notifyPreview ? "checked" : ""}><span class="slider"></span></label></div>
 
@@ -3993,6 +5113,10 @@
       }
       draft.notifyCalls = e.target.checked; markDirty();
     });
+    const missedAlerts = document.getElementById("set-missed-alerts");
+    if (missedAlerts) missedAlerts.addEventListener("change", (e) => {
+      draft.missedCallAlerts = e.target.checked; markDirty();
+    });
     document.getElementById("open-changepw").addEventListener("click", () => { close(); openChangePasswordModal(); });
     document.getElementById("open-shortcuts").addEventListener("click", () => { close(); openShortcutsModal(); });
     document.getElementById("clear-cache").addEventListener("click", async () => {
@@ -4120,7 +5244,7 @@
             </div>
             ${isGroup && amAdmin ? '<input type="file" id="ci-avatar-input" accept="image/*" style="display:none" />' : ""}
             <div style="font-size:18px;font-weight:600" id="ci-name">${escapeHtml(chat.name)}</div>
-            <div class="settings-sub">${isChannel ? "Канал" : (isGroup ? "Группа" : "Личный чат")} · ${chat.members.length} ${unit}</div>
+            <div class="settings-sub">${isChannel ? "Канал" : (isGroup ? "Группа" : "Личный чат")} · ${chat.member_count || chat.members.length} ${unit}</div>
             ${chat.description ? `<div style="margin-top:8px;color:var(--text-secondary)">${escapeHtml(chat.description)}</div>` : ""}
             ${privateContactInfo}
           </div>
@@ -4150,19 +5274,30 @@
     overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
 
     renderCIMembers();
-    function renderCIMembers() {
+    async function renderCIMembers() {
       const box = document.getElementById("ci-members");
-      box.innerHTML = chat.members.map((m) => `
+      box.innerHTML = `<div class="list-empty">Загрузка…</div>`;
+      let members = [];
+      try { members = await API.listChatMembers(chat.id, 0, 80); } catch (e) { members = chat.members || []; }
+      if (!members.length) { box.innerHTML = `<div class="list-empty">Нет участников</div>`; return; }
+      const totalN = chat.member_count || members.length;
+      const shown = members.slice(0, 60);
+      box.innerHTML = shown.map((m) => {
+        const name = m.full_name || m.username || "";
+        const bg = m.avatar_color || "#3390ec";
+        return `
         <div class="user-pick-item">
-          ${avatarHtml({ url: m.avatar_url, color: m.avatar_color, name: m.full_name || m.username, size: "sm", extra: m.is_online ? '<span class="online-dot"></span>' : "" })}
+          <div class="avatar sm" style="background:${escapeAttr(bg)}">${escapeHtml(initials(name))}${m.is_online ? '<span class="online-dot"></span>' : ""}</div>
           <div class="user-pick-name">
-            <div class="un">${escapeHtml(m.full_name || m.username)}${m.id === State.me.id ? " (вы)" : ""} ${m.is_chat_admin ? '<span class="badge admin">админ</span>' : ""}</div>
-            <div class="uh">@${escapeHtml(m.username)}</div>
+            <div class="un">${escapeHtml(name)}${m.id === State.me.id ? " (вы)" : ""} ${m.is_chat_admin ? '<span class="badge admin">админ</span>' : ""}</div>
+            <div class="uh">@${escapeHtml(m.username || "")}</div>
           </div>
-          ${isGroup && amAdmin && m.id !== State.me.id ? `
+          ${isGroup && !isChannel && amAdmin && m.id !== State.me.id ? `
             <button class="mini-btn" data-mact="admin" data-id="${m.id}">${m.is_chat_admin ? "Снять" : "Админ"}</button>
             <button class="mini-btn danger" data-mact="remove" data-id="${m.id}">Удалить</button>` : ""}
-        </div>`).join("");
+        </div>`;
+      }).join("") + (totalN > shown.length ? `<div class="list-empty">Ещё ${totalN - shown.length} ${unit}</div>` : "")
+        + (isChannel && State.me.role === "admin" ? `<div class="settings-sub" style="margin-top:8px">Кто может писать в канал, назначается в админке → Чаты → Авторы.</div>` : "");
       box.querySelectorAll("button[data-mact]").forEach((b) => b.addEventListener("click", async () => {
         const id = parseInt(b.getAttribute("data-id"), 10), act = b.getAttribute("data-mact");
         try {
@@ -4224,38 +5359,61 @@
     overlay.innerHTML = `
       <div class="modal">
         <div class="modal-header"><h2>${State.activeChat && State.activeChat.type === "channel" ? "Добавить подписчиков" : "Добавить участников"}</h2><button class="modal-close">✕</button></div>
-        <div class="modal-body"><div class="field"><input type="text" id="am-search" placeholder="Поиск пользователей..." /></div><div id="am-list"></div></div>
+        <div class="modal-body">
+          <div class="field"><input type="text" id="am-search" placeholder="Поиск пользователей..." /></div>
+          <div class="user-pick-toolbar"><button type="button" class="btn-secondary" id="am-pick-all">Добавить всех</button></div>
+          <div id="am-list"></div>
+        </div>
         <div class="modal-footer"><button class="btn-secondary" id="modal-cancel">Отмена</button><button class="btn-primary inline" id="am-add" disabled>Добавить</button></div>
       </div>`;
     overlay.classList.add("show");
     const selected = new Set();
+    const addAllRef = { on: false };
     function close() { overlay.classList.remove("show"); overlay.innerHTML = ""; }
     overlay.querySelector(".modal-close").addEventListener("click", close);
     document.getElementById("modal-cancel").addEventListener("click", close);
     overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
     const search = document.getElementById("am-search"), listEl = document.getElementById("am-list"), addBtn = document.getElementById("am-add");
+    const pickAllBtn = document.getElementById("am-pick-all");
     const existingIds = new Set((State.activeChat.members || []).map((m) => m.id));
-    async function render(q) {
-      let users = []; try { users = await API.searchUsers(q); } catch (e) {}
-      users = users.filter((u) => !existingIds.has(u.id));
-      if (!users.length) { listEl.innerHTML = `<div class="list-empty">Никого не найдено</div>`; return; }
-      listEl.innerHTML = users.map((u) => `
-        <div class="user-pick-item ${selected.has(u.id) ? "selected" : ""}" data-id="${u.id}">
-          ${avatarHtml({ url: u.avatar_url, color: u.avatar_color, name: u.full_name || u.username, size: "sm" })}
-          <div class="user-pick-name"><div class="un">${escapeHtml(u.full_name || u.username)}</div><div class="uh">@${escapeHtml(u.username)}</div></div>
-          ${selected.has(u.id) ? '<span class="checkmark">✓</span>' : ""}</div>`).join("");
-      listEl.querySelectorAll(".user-pick-item").forEach((el) => el.addEventListener("click", () => {
-        const id = parseInt(el.getAttribute("data-id"), 10);
-        if (selected.has(id)) selected.delete(id); else selected.add(id);
-        addBtn.disabled = selected.size === 0; render(search.value.trim());
-      }));
+    function syncAddBtn() {
+      const busy = addBtn.dataset.busy === "1";
+      const hasSel = addAllRef.on || selected.size > 0;
+      addBtn.disabled = busy || !hasSel;
+      if (!busy) addBtn.textContent = addAllRef.on ? "Добавить · всех" : (selected.size ? ("Добавить · " + selected.size) : "Добавить");
     }
+    const picker = mountUserPicker({
+      listEl, selected, pickAllBtn, existingIds, addAllRef, onChange: syncAddBtn,
+      emptyText: "Никого не найдено",
+    });
     let t = null;
-    search.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => render(search.value.trim()), 250); });
-    render("");
+    search.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => picker.load(search.value.trim()), 250); });
+    (async () => {
+      try {
+        const rows = await API.listChatMembers(chatId, 0, 500);
+        (rows || []).forEach((m) => existingIds.add(m.id));
+      } catch (e) {}
+      picker.load("");
+      API.usersCount().then((r) => {
+        const n = Math.max(0, ((r && r.count) || 0) - existingIds.size);
+        picker.setTotalCount(n);
+      }).catch(() => {});
+    })();
     addBtn.addEventListener("click", async () => {
-      try { await API.addMembers(chatId, Array.from(selected)); window.toast("Участники добавлены", "success"); close(); reloadActiveChat(); }
-      catch (e) { window.toast(e.message, "error"); }
+      if ((!selected.size && !addAllRef.on) || addBtn.dataset.busy === "1") return;
+      addBtn.dataset.busy = "1";
+      addBtn.disabled = true;
+      addBtn.textContent = "Добавление…";
+      try {
+        await API.addMembers(chatId, addAllRef.on ? [] : Array.from(selected), addAllRef.on);
+        window.toast("Участники добавлены", "success");
+        close();
+        reloadActiveChat();
+      } catch (e) {
+        window.toast(e.message, "error");
+        addBtn.dataset.busy = "0";
+        syncAddBtn();
+      }
     });
   }
 
@@ -4421,26 +5579,101 @@
     const images = galleryImages();
     let idx = Math.max(0, images.findIndex((x) => x.url === url));
     if (idx < 0) { images.push({ url, name: name || "" }); idx = images.length - 1; }
+    let scale = 1, tx = 0, ty = 0, dragging = false, lx = 0, ly = 0;
+    function applyTransform(img) {
+      if (!img) return;
+      img.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+      img.style.cursor = scale > 1 ? (dragging ? "grabbing" : "grab") : "zoom-in";
+      const z = lb.querySelector(".lb-zoom-val");
+      if (z) z.textContent = Math.round(scale * 100) + "%";
+    }
+    function setScale(next, img, clientX, clientY) {
+      if (!img) return;
+      const prev = scale;
+      const clamped = Math.max(1, Math.min(6, next));
+      if (clamped === 1) {
+        scale = 1; tx = 0; ty = 0;
+        applyTransform(img);
+        return;
+      }
+      if (clamped !== prev && clientX != null && clientY != null && prev > 0) {
+        const rect = img.getBoundingClientRect();
+        const ox = clientX - (rect.left + rect.width / 2);
+        const oy = clientY - (rect.top + rect.height / 2);
+        const k = 1 - clamped / prev;
+        tx += ox * k;
+        ty += oy * k;
+      }
+      scale = clamped;
+      applyTransform(img);
+    }
     function render() {
       const cur = images[idx] || { url, name };
+      scale = 1; tx = 0; ty = 0; dragging = false;
       lb.innerHTML = `
         <button class="lb-close" title="Закрыть">✕</button>
         <a class="lb-download" href="${escapeAttr(cur.url)}" download="${escapeAttr(cur.name || "")}" target="_blank" rel="noopener" title="Скачать">⬇</a>
+        <div class="lb-zoom-tools">
+          <button class="lb-zoom-btn" data-z="out" title="Отдалить">−</button>
+          <span class="lb-zoom-val">100%</span>
+          <button class="lb-zoom-btn" data-z="in" title="Приблизить">+</button>
+          <button class="lb-zoom-btn" data-z="reset" title="Сбросить">1:1</button>
+        </div>
         ${images.length > 1 ? `<button class="lb-nav prev" title="Назад">‹</button><button class="lb-nav next" title="Вперёд">›</button><div class="lb-counter">${idx + 1} / ${images.length}</div>` : ""}
-        <img src="${escapeAttr(cur.url)}" alt="${escapeAttr(cur.name || "")}" />`;
+        <div class="lb-stage"><img src="${escapeAttr(cur.url)}" alt="${escapeAttr(cur.name || "")}" draggable="false" /></div>`;
+      const img = lb.querySelector(".lb-stage img");
       lb.querySelector(".lb-close").addEventListener("click", close);
       lb.querySelector(".lb-download").addEventListener("click", () => API.logDownload(cur.url, cur.name || "", "download").catch(() => {}));
+      lb.querySelectorAll(".lb-zoom-btn").forEach((b) => b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const z = b.getAttribute("data-z");
+        if (z === "in") setScale(scale + 0.35, img);
+        else if (z === "out") setScale(scale - 0.35, img);
+        else setScale(1, img);
+      }));
       const prev = lb.querySelector(".lb-nav.prev"), next = lb.querySelector(".lb-nav.next");
       if (prev) prev.addEventListener("click", (e) => { e.stopPropagation(); idx = (idx - 1 + images.length) % images.length; render(); });
       if (next) next.addEventListener("click", (e) => { e.stopPropagation(); idx = (idx + 1) % images.length; render(); });
+      const stage = lb.querySelector(".lb-stage");
+      function zoomByWheel(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        img.style.transition = "none";
+        setScale(scale + (e.deltaY < 0 ? 0.25 : -0.25), img, e.clientX, e.clientY);
+      }
+      if (img) {
+        img.addEventListener("dblclick", (e) => {
+          e.stopPropagation();
+          setScale(scale > 1 ? 1 : 2.2, img, e.clientX, e.clientY);
+        });
+        img.addEventListener("wheel", zoomByWheel, { passive: false });
+        if (stage) stage.addEventListener("wheel", zoomByWheel, { passive: false });
+        img.addEventListener("pointerdown", (e) => {
+          if (scale <= 1) { setScale(2, img, e.clientX, e.clientY); return; }
+          dragging = true; lx = e.clientX; ly = e.clientY;
+          img.setPointerCapture(e.pointerId);
+          applyTransform(img);
+        });
+        img.addEventListener("pointermove", (e) => {
+          if (!dragging) return;
+          tx += e.clientX - lx; ty += e.clientY - ly; lx = e.clientX; ly = e.clientY;
+          applyTransform(img);
+        });
+        img.addEventListener("pointerup", () => { dragging = false; applyTransform(img); });
+        img.addEventListener("pointercancel", () => { dragging = false; applyTransform(img); });
+      }
+      applyTransform(img);
       API.logDownload(cur.url, cur.name || "", "preview").catch(() => {});
     }
     lb.classList.add("show");
-    const close = () => lb.classList.remove("show");
-    lb.onclick = (e) => { if (e.target === lb) close(); };
+    const close = () => { lb.classList.remove("show"); lb.innerHTML = ""; };
+    lb.onclick = (e) => { if (e.target === lb || (e.target && e.target.classList && e.target.classList.contains("lb-stage"))) close(); };
     document.addEventListener("keydown", function esc(e) {
       if (!lb.classList.contains("show")) { document.removeEventListener("keydown", esc); return; }
       if (e.key === "Escape") { close(); document.removeEventListener("keydown", esc); }
+      if (e.key === "+" || e.key === "=") { const img = lb.querySelector(".lb-stage img"); setScale(scale + 0.35, img); }
+      if (e.key === "-" || e.key === "_") { const img = lb.querySelector(".lb-stage img"); setScale(scale - 0.35, img); }
+      if (e.key === "0") { const img = lb.querySelector(".lb-stage img"); setScale(1, img); }
       if (e.key === "ArrowLeft" && images.length > 1) { idx = (idx - 1 + images.length) % images.length; render(); }
       if (e.key === "ArrowRight" && images.length > 1) { idx = (idx + 1) % images.length; render(); }
     });
@@ -4571,16 +5804,21 @@
   function bindFocusClear() {
     if (_focusBound) return;
     _focusBound = true;
-    window.addEventListener("focus", () => {
+    const onFront = () => {
       const D = window.CorporateChatDesktop;
       if (D && typeof D.clearFlash === "function") { try { D.clearFlash(); } catch (e) {} }
+      maybeMarkActiveChatRead();
+    };
+    window.addEventListener("focus", onFront);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) onFront();
     });
   }
 
   window.addEventListener("pagehide", () => cleanupPendingEmptyPrivateChat(false));
 
   window.ChatView = {
-    mount: async function () { renderLayout(); applyPrefs(); connectWS(); setupIdleWatcher(); bindFocusClear(); bindPlainMessageCopy(); loadPermissions(); loadMissedCallsUnread(); await loadChats(); if ((location.hash || "").indexOf("calls=1") >= 0) setTimeout(openCallsModal, 200); },
+    mount: async function () { renderLayout(); applyPrefs(); if (window.loadAppConfig) window.loadAppConfig(); connectWS(); setupIdleWatcher(); bindFocusClear(); bindPlainMessageCopy(); loadPermissions(); loadMissedCallsUnread(); await loadChats(); if ((location.hash || "").indexOf("calls=1") >= 0) setTimeout(openCallsModal, 200); },
     openChat: async function (chatId) {
       if (!document.getElementById("app-layout")) { renderLayout(); connectWS(); bindPlainMessageCopy(); loadMissedCallsUnread(); await loadChats(); if ((location.hash || "").indexOf("calls=1") >= 0) setTimeout(openCallsModal, 200); }
       await openChat(chatId);
